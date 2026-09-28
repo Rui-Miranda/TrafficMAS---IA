@@ -1,0 +1,11 @@
+# Pastas de compilação de código Java
+bin/
+*.class
+
+# Ficheiros temporários gerados automaticamente pelo JADE durante a execução
+APDescription.txt
+MTPs-Main-Container.txt
+
+# Ficheiros de índice locais do editor
+.vscode/.project
+.vscode/.classpath
