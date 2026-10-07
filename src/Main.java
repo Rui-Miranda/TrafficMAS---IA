@@ -14,24 +14,39 @@ public class Main {
         AgentContainer container = rt.createMainContainer(p);
 
         try {
-            // Lança os dois agentes semáforo (Norte-Sul e Este-Oeste)
-            AgentController tl1 = container.createNewAgent(
-                    "Semaforo_NS",
-                    "agents.TrafficLightAgent",
-                    new Object[] { "Norte-Sul" });
-            AgentController tl2 = container.createNewAgent(
-                    "Semaforo_EW",
-                    "agents.TrafficLightAgent",
-                    new Object[] { "Este-Oeste" });
-            tl1.start();
-            tl2.start();
+            // Inicializa a interface da Cidade com 4 cruzamentos
+            environment.CitySimulationGUI.getInstance();
 
-            // Lança um veículo de teste na via Norte-Sul
-            AgentController car1 = container.createNewAgent(
-                    "Carro_01",
-                    "agents.VehicleAgent",
-                    new Object[] { "NS" });
-            car1.start();
+            // Configurar 4 Cruzamentos centrais (NW=0, NE=1, SW=2, SE=3)
+            String[] crossings = {"C1_NW", "C2_NE", "C3_SW", "C4_SE"};
+            for (int i = 0; i < 4; i++) {
+                AgentController tlNS = container.createNewAgent(
+                        "Semaforo_NS_" + crossings[i],
+                        "agents.TrafficLightAgent",
+                        new Object[] { "Norte-Sul", i });
+                AgentController tlEW = container.createNewAgent(
+                        "Semaforo_EW_" + crossings[i],
+                        "agents.TrafficLightAgent",
+                        new Object[] { "Este-Oeste", i });
+                tlNS.start();
+                tlEW.start();
+            }
+
+            // Lança viaturas a percorrer a cidade em diferentes direções
+            String[][] cars = {
+                {"Carro_01", "NS"},
+                {"Carro_02", "EW"},
+                {"Carro_03", "NS"},
+                {"Carro_04", "EW"}
+            };
+
+            for (String[] carInfo : cars) {
+                AgentController car = container.createNewAgent(
+                        carInfo[0],
+                        "agents.VehicleAgent",
+                        new Object[] { carInfo[1] });
+                car.start();
+            }
 
         } catch (Exception e) {
             e.printStackTrace();
