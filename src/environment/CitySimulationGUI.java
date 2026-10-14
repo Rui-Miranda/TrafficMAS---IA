@@ -204,11 +204,13 @@ public class CitySimulationGUI extends JFrame {
      * ========================================================================= */
 
     public synchronized int getTargetIntersection(VisualVehicle v) {
+        boolean isWest = (v.x < 460);
+        boolean isNorth = (v.y < 460);
         switch (v.direction) {
-            case 0: return (v.y < ROAD_Y1 - 2) ? 0 : 2;
-            case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? 3 : 1;
-            case 2: return (v.x < ROAD_X1 - 2) ? 0 : 1;
-            case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? 3 : 2;
+            case 0: return (v.y < ROAD_Y1 - 2) ? (isWest ? 0 : 1) : (isWest ? 2 : 3);
+            case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? (isWest ? 2 : 3) : (isWest ? 0 : 1);
+            case 2: return (v.x < ROAD_X1 - 2) ? (isNorth ? 0 : 2) : (isNorth ? 1 : 3);
+            case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? (isNorth ? 1 : 3) : (isNorth ? 0 : 2);
             default: return 0;
         }
     }
@@ -229,7 +231,8 @@ public class CitySimulationGUI extends JFrame {
             if (v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
-            if (getTargetIntersection(v) == interIdx && getDistanceToTargetStopLine(v) <= 220.0) {
+            double dist = getDistanceToTargetStopLine(v);
+            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0) {
                 count++;
             }
         }
@@ -242,7 +245,8 @@ public class CitySimulationGUI extends JFrame {
             if (v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
-            if (getTargetIntersection(v) == interIdx && getDistanceToTargetStopLine(v) <= 220.0 && v.currentSpeed < 0.2) {
+            double dist = getDistanceToTargetStopLine(v);
+            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0 && v.currentSpeed < 0.2) {
                 count++;
             }
         }
@@ -254,7 +258,8 @@ public class CitySimulationGUI extends JFrame {
             if (!v.isEmergency || v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
-            if (getTargetIntersection(v) == interIdx && getDistanceToTargetStopLine(v) <= 260.0) {
+            double dist = getDistanceToTargetStopLine(v);
+            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 260.0) {
                 return true;
             }
         }
@@ -342,49 +347,51 @@ public class CitySimulationGUI extends JFrame {
             int nextIntersectionIdx = -1;
 
             // 2. Determinar a distância exata até à Stop Line da próxima interseção
+            boolean isWest = (v.x < 460);
+            boolean isNorth = (v.y < 460);
             switch (v.direction) {
                 case 0: // N->S
                     if (v.y < ROAD_Y1 - 2) {
                         distToStopLine = (ROAD_Y1 - 2) - v.y;
-                        nextLight = lights[0][0]; // C1_NW NS
-                        nextIntersectionIdx = 0;
+                        nextIntersectionIdx = isWest ? 0 : 1;
+                        nextLight = lights[nextIntersectionIdx][0];
                     } else if (v.y < ROAD_Y2 - 2) {
                         distToStopLine = (ROAD_Y2 - 2) - v.y;
-                        nextLight = lights[2][0]; // C3_SW NS
-                        nextIntersectionIdx = 2;
+                        nextIntersectionIdx = isWest ? 2 : 3;
+                        nextLight = lights[nextIntersectionIdx][0];
                     }
                     break;
                 case 1: // S->N
                     if (v.y > ROAD_Y2 + ROAD_WIDTH + 2) {
                         distToStopLine = v.y - (ROAD_Y2 + ROAD_WIDTH + 2);
-                        nextLight = lights[3][0]; // C4_SE NS
-                        nextIntersectionIdx = 3;
+                        nextIntersectionIdx = isWest ? 2 : 3;
+                        nextLight = lights[nextIntersectionIdx][0];
                     } else if (v.y > ROAD_Y1 + ROAD_WIDTH + 2) {
                         distToStopLine = v.y - (ROAD_Y1 + ROAD_WIDTH + 2);
-                        nextLight = lights[1][0]; // C2_NE NS
-                        nextIntersectionIdx = 1;
+                        nextIntersectionIdx = isWest ? 0 : 1;
+                        nextLight = lights[nextIntersectionIdx][0];
                     }
                     break;
                 case 2: // W->E
                     if (v.x < ROAD_X1 - 2) {
                         distToStopLine = (ROAD_X1 - 2) - v.x;
-                        nextLight = lights[0][1]; // C1_NW EW
-                        nextIntersectionIdx = 0;
+                        nextIntersectionIdx = isNorth ? 0 : 2;
+                        nextLight = lights[nextIntersectionIdx][1];
                     } else if (v.x < ROAD_X2 - 2) {
                         distToStopLine = (ROAD_X2 - 2) - v.x;
-                        nextLight = lights[1][1]; // C2_NE EW
-                        nextIntersectionIdx = 1;
+                        nextIntersectionIdx = isNorth ? 1 : 3;
+                        nextLight = lights[nextIntersectionIdx][1];
                     }
                     break;
                 case 3: // E->W
                     if (v.x > ROAD_X2 + ROAD_WIDTH + 2) {
                         distToStopLine = v.x - (ROAD_X2 + ROAD_WIDTH + 2);
-                        nextLight = lights[3][1]; // C4_SE EW
-                        nextIntersectionIdx = 3;
+                        nextIntersectionIdx = isNorth ? 1 : 3;
+                        nextLight = lights[nextIntersectionIdx][1];
                     } else if (v.x > ROAD_X1 + ROAD_WIDTH + 2) {
                         distToStopLine = v.x - (ROAD_X1 + ROAD_WIDTH + 2);
-                        nextLight = lights[2][1]; // C3_SW EW
-                        nextIntersectionIdx = 2;
+                        nextIntersectionIdx = isNorth ? 0 : 2;
+                        nextLight = lights[nextIntersectionIdx][1];
                     }
                     break;
             }
@@ -464,6 +471,13 @@ public class CitySimulationGUI extends JFrame {
         for (VisualVehicle other : vehicles) {
             if (other == v || other.direction != v.direction || other.laneIndex != v.laneIndex || other.inIntersection) continue;
 
+            // Verificar se estão no mesmo corredor viário (evita colisões falsas entre vias paralelas)
+            if (v.direction == 0 || v.direction == 1) {
+                if (Math.abs(other.x - v.x) > 15.0) continue;
+            } else {
+                if (Math.abs(other.y - v.y) > 15.0) continue;
+            }
+
             double d = 9999.0;
             switch (v.direction) {
                 case 0: // N->S
@@ -501,9 +515,9 @@ public class CitySimulationGUI extends JFrame {
         if (v.intent == ManeuverIntent.TURN_RIGHT) {
             // Curva à Direita: Faixa exterior -> Faixa exterior da nova via (pequeno raio)
             switch (v.direction) {
-                case 0: // N->S virando para Oeste: sai na metade inferior (Y + 3.5 * LANE)
+                case 0: // N->S virando para Oeste: sai na metade superior (Y + 0.5 * LANE)
                     v.turnEndX = ix - 2;
-                    v.turnEndY = iy + 3.5 * LANE_WIDTH;
+                    v.turnEndY = iy + 0.5 * LANE_WIDTH;
                     v.turnTargetAngle = Math.PI; // E->W
                     break;
                 case 1: // S->N virando para Este: sai na metade inferior (Y + 3.5 * LANE)
@@ -577,8 +591,19 @@ public class CitySimulationGUI extends JFrame {
         int iy = (v.activeIntersection == 0 || v.activeIntersection == 1) ? ROAD_Y1 : ROAD_Y2;
 
         // Ponto de controlo P1 varia se a curva for fechada (à direita) ou aberta (à esquerda)
-        double ctrlX = (v.intent == ManeuverIntent.TURN_RIGHT) ? v.turnStartX : (ix + ROAD_WIDTH / 2.0);
-        double ctrlY = (v.intent == ManeuverIntent.TURN_RIGHT) ? v.turnEndY : (iy + ROAD_WIDTH / 2.0);
+        double ctrlX, ctrlY;
+        if (v.intent == ManeuverIntent.TURN_RIGHT) {
+            if (v.direction == 0 || v.direction == 1) {
+                ctrlX = v.turnStartX;
+                ctrlY = v.turnEndY;
+            } else {
+                ctrlX = v.turnEndX;
+                ctrlY = v.turnStartY;
+            }
+        } else {
+            ctrlX = ix + ROAD_WIDTH / 2.0;
+            ctrlY = iy + ROAD_WIDTH / 2.0;
+        }
 
         double nextX = Math.pow(1 - t, 2) * v.turnStartX + 2 * (1 - t) * t * ctrlX + Math.pow(t, 2) * v.turnEndX;
         double nextY = Math.pow(1 - t, 2) * v.turnStartY + 2 * (1 - t) * t * ctrlY + Math.pow(t, 2) * v.turnEndY;
