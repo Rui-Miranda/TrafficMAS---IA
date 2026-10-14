@@ -36,6 +36,10 @@ public class CitySimulationGUI extends JFrame {
         public ManeuverIntent intent = ManeuverIntent.GO_STRAIGHT;
         public int laneIndex = 0; // 0: Faixa exterior/direita, 1: Faixa interior/esquerda
 
+        // Métricas individuais de telemetria e espera (Feature 8)
+        public long totalWaitMillis = 0;
+        public long currentStopStartMillis = 0;
+
         // Estado da manobra dentro do cruzamento
         public boolean inIntersection = false;
         public double turnProgress = 0.0;
@@ -93,6 +97,13 @@ public class CitySimulationGUI extends JFrame {
     private int fpsCounter = 0;
     private int displayedFps = 30;
     private long lastFpsCheck = System.currentTimeMillis();
+
+    // Métricas agregadas de desempenho (Feature 8) e estado preditivo de perturbação (Feature 5)
+    private long totalCompletedPasses = 0;
+    private double totalWaitTimeSeconds = 0.0;
+    private int preemptionCount = 0;
+    private String disruptionNotice = "Condições Normais (Atrito 100%)";
+    private double globalSpeedMultiplier = 1.0;
 
     public CitySimulationGUI() {
         super("TrafficMAS — Intelligent Multi-Agent Urban Simulation (Kinematic)");
@@ -188,6 +199,136 @@ public class CitySimulationGUI extends JFrame {
         vehicles.add(new VisualVehicle(id, startX, startY, maxSpeed, direction, color, intent, laneIndex));
     }
 
+    /* =========================================================================
+     * MÉTODOS DE PERCEÇÃO SENSORIAL E ATUAÇÃO PARA OS AGENTES (Features 1, 6, 7, 8)
+     * ========================================================================= */
+
+    public synchronized int getTargetIntersection(VisualVehicle v) {
+        switch (v.direction) {
+            case 0: return (v.y < ROAD_Y1 - 2) ? 0 : 2;
+            case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? 3 : 1;
+            case 2: return (v.x < ROAD_X1 - 2) ? 0 : 1;
+            case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? 3 : 2;
+            default: return 0;
+        }
+    }
+
+    public synchronized double getDistanceToTargetStopLine(VisualVehicle v) {
+        switch (v.direction) {
+            case 0: return (v.y < ROAD_Y1 - 2) ? ((ROAD_Y1 - 2) - v.y) : ((ROAD_Y2 - 2) - v.y);
+            case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? (v.y - (ROAD_Y2 + ROAD_WIDTH + 2)) : (v.y - (ROAD_Y1 + ROAD_WIDTH + 2));
+            case 2: return (v.x < ROAD_X1 - 2) ? ((ROAD_X1 - 2) - v.x) : ((ROAD_X2 - 2) - v.x);
+            case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? (v.x - (ROAD_X2 + ROAD_WIDTH + 2)) : (v.x - (ROAD_X1 + ROAD_WIDTH + 2));
+            default: return 9999.0;
+        }
+    }
+
+    public synchronized int getApproachingCount(int interIdx, int axis) {
+        int count = 0;
+        for (VisualVehicle v : vehicles) {
+            if (v.inIntersection) continue;
+            int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+            if (targetAxis != axis) continue;
+            if (getTargetIntersection(v) == interIdx && getDistanceToTargetStopLine(v) <= 220.0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public synchronized int getWaitingCount(int interIdx, int axis) {
+        int count = 0;
+        for (VisualVehicle v : vehicles) {
+            if (v.inIntersection) continue;
+            int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+            if (targetAxis != axis) continue;
+            if (getTargetIntersection(v) == interIdx && getDistanceToTargetStopLine(v) <= 220.0 && v.currentSpeed < 0.2) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public synchronized boolean hasEmergencyApproaching(int interIdx, int axis) {
+        for (VisualVehicle v : vehicles) {
+            if (!v.isEmergency || v.inIntersection) continue;
+            int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+            if (targetAxis != axis) continue;
+            if (getTargetIntersection(v) == interIdx && getDistanceToTargetStopLine(v) <= 260.0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public synchronized double getVehicleWaitSeconds(String vehicleId) {
+        for (VisualVehicle v : vehicles) {
+            if (v.id.equals(vehicleId)) {
+                if (v.currentStopStartMillis > 0) {
+                    return (System.currentTimeMillis() - v.currentStopStartMillis) / 1000.0;
+                }
+                return 0.0;
+            }
+        }
+        return 0.0;
+    }
+
+    public synchronized VisualVehicle getVisualVehicle(String vehicleId) {
+        for (VisualVehicle v : vehicles) {
+            if (v.id.equals(vehicleId)) return v;
+        }
+        return null;
+    }
+
+    public synchronized void triggerEmergencyPreemption(int interIdx, int axis) {
+        if (interIdx >= 0 && interIdx < 4 && axis >= 0 && axis <= 1) {
+            preemptionCount++;
+            int oppositeAxis = (axis == 0) ? 1 : 0;
+            lights[interIdx][oppositeAxis] = LightState.RED;
+            lights[interIdx][axis] = LightState.GREEN;
+            System.out.println("[CitySimulationGUI] Preempção de emergência aplicada no Cruzamento C" + (interIdx + 1) + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
+        }
+    }
+
+    public synchronized void setDisruptionNotice(String notice, double speedFactor) {
+        this.disruptionNotice = notice;
+        this.globalSpeedMultiplier = Math.max(0.4, Math.min(1.2, speedFactor));
+    }
+
+    public synchronized String getDisruptionNotice() {
+        return disruptionNotice;
+    }
+
+    public synchronized double getGlobalSpeedMultiplier() {
+        return globalSpeedMultiplier;
+    }
+
+    public synchronized double getAverageWaitSeconds() {
+        if (totalCompletedPasses == 0) {
+            long stopped = vehicles.stream().filter(v -> v.currentSpeed < 0.2).count();
+            return stopped * 1.5;
+        }
+        return Math.round((totalWaitTimeSeconds / totalCompletedPasses) * 10.0) / 10.0;
+    }
+
+    public synchronized long getTotalCompletedPasses() {
+        return totalCompletedPasses;
+    }
+
+    public synchronized int getPreemptionCount() {
+        return preemptionCount;
+    }
+
+    private synchronized void recordVehiclePass(VisualVehicle v) {
+        totalCompletedPasses++;
+        if (v.currentStopStartMillis > 0) {
+            v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
+            v.currentStopStartMillis = 0;
+        }
+        totalWaitTimeSeconds += (v.totalWaitMillis / 1000.0);
+        v.totalWaitMillis = 0;
+    }
+
     private void updatePositions() {
         for (VisualVehicle v : vehicles) {
             // 1. Tratamento de Manobra Ativa no Interior do Cruzamento
@@ -263,26 +404,34 @@ public class CitySimulationGUI extends JFrame {
                 if (limitDist <= 2.0) {
                     v.currentSpeed = 0.0;
                     v.wasStopped = true;
+                    if (v.currentStopStartMillis == 0) {
+                        v.currentStopStartMillis = System.currentTimeMillis();
+                    }
                 } else {
-                    double targetSpeed = Math.max(0.0, (limitDist / 50.0) * v.maxSpeed);
+                    double targetSpeed = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * globalSpeedMultiplier));
                     v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.14);
                     if (v.currentSpeed > targetSpeed) v.currentSpeed = targetSpeed;
                 }
             } else {
                 v.isBraking = false;
+                if (v.currentStopStartMillis > 0) {
+                    v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
+                    v.currentStopStartMillis = 0;
+                }
+                double effectiveMaxSpeed = v.maxSpeed * globalSpeedMultiplier;
                 if (v.wasStopped) {
                     if (v.startDelayTicks < 14) {
                         v.startDelayTicks++;
                         v.currentSpeed = 0.0;
                     } else {
-                        v.currentSpeed = Math.min(v.maxSpeed, v.currentSpeed + 0.06);
-                        if (v.currentSpeed >= v.maxSpeed * 0.8) {
+                        v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.06);
+                        if (v.currentSpeed >= effectiveMaxSpeed * 0.8) {
                             v.wasStopped = false;
                             v.startDelayTicks = 0;
                         }
                     }
                 } else {
-                    v.currentSpeed = Math.min(v.maxSpeed, v.currentSpeed + 0.05);
+                    v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.05);
                 }
             }
 
@@ -302,11 +451,11 @@ public class CitySimulationGUI extends JFrame {
                 case 3: v.x -= v.currentSpeed; v.headingAngle = Math.PI; break;
             }
 
-            // Wrap-around contínuo
-            if (v.y > 1030) { v.y = -30; v.wasStopped = false; }
-            if (v.y < -40) { v.y = 1010; v.wasStopped = false; }
-            if (v.x > 1030) { v.x = -30; v.wasStopped = false; }
-            if (v.x < -40) { v.x = 1010; v.wasStopped = false; }
+            // Wrap-around contínuo com registo de telemetria
+            if (v.y > 1030) { v.y = -30; v.wasStopped = false; recordVehiclePass(v); }
+            if (v.y < -40) { v.y = 1010; v.wasStopped = false; recordVehiclePass(v); }
+            if (v.x > 1030) { v.x = -30; v.wasStopped = false; recordVehiclePass(v); }
+            if (v.x < -40) { v.x = 1010; v.wasStopped = false; recordVehiclePass(v); }
         }
     }
 
@@ -770,44 +919,61 @@ public class CitySimulationGUI extends JFrame {
 
         private void drawHUD(Graphics2D g2, int width) {
             int hudX = 20;
-            int hudY = 16;
+            int hudY = 12;
             int hudW = width - 40;
-            int hudH = 54;
+            int hudH = 74;
 
-            g2.setColor(new Color(250, 252, 255, 240));
+            g2.setColor(new Color(250, 252, 255, 245));
             g2.fill(new RoundRectangle2D.Double(hudX, hudY, hudW, hudH, 14, 14));
 
             g2.setColor(new Color(190, 200, 215));
             g2.setStroke(new BasicStroke(1.2f));
             g2.draw(new RoundRectangle2D.Double(hudX, hudY, hudW, hudH, 14, 14));
 
+            // Título Principal
             g2.setColor(new Color(30, 40, 55));
             g2.setFont(new Font("Segoe UI", Font.BOLD, 14));
-            g2.drawString("TrafficMAS", hudX + 18, hudY + 24);
+            g2.drawString("TrafficMAS", hudX + 16, hudY + 22);
 
             g2.setColor(new Color(110, 125, 145));
             g2.setFont(new Font("Segoe UI", Font.PLAIN, 10));
-            g2.drawString("Autonomous 4-Lane City Control", hudX + 18, hudY + 41);
+            g2.drawString("Autonomous 4-Lane City Control (ISPGaya)", hudX + 16, hudY + 36);
+
+            // Linha 2: Status do Agente de Perturbações (Feature 5)
+            boolean hasAlert = globalSpeedMultiplier < 0.95;
+            g2.setColor(hasAlert ? new Color(220, 50, 50) : new Color(30, 140, 60));
+            g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
+            String statusPrefix = hasAlert ? "⚠️ [IA-ML ALERTA] " : "✔ [IA-ML NORMAL] ";
+            g2.drawString(statusPrefix + disruptionNotice, hudX + 16, hudY + 58);
 
             int totalCars = vehicles.size();
             long stoppedCars = vehicles.stream().filter(v -> v.currentSpeed < 0.2).count();
             long elapsedSec = (System.currentTimeMillis() - simulationStartMillis) / 1000;
+            double avgWait = getAverageWaitSeconds();
 
-            drawBadge(g2, hudX + 270, hudY + 14, "VEÍCULOS", String.valueOf(totalCars), new Color(20, 130, 210));
-            drawBadge(g2, hudX + 370, hudY + 14, "PARADOS", String.valueOf(stoppedCars), (stoppedCars > 0) ? new Color(220, 60, 60) : new Color(40, 170, 90));
-            drawBadge(g2, hudX + 465, hudY + 14, "FPS", String.valueOf(displayedFps), new Color(50, 160, 80));
-            drawBadge(g2, hudX + 530, hudY + 14, "TEMPO", elapsedSec + "s", new Color(130, 90, 210));
+            // Badges de Telemetria
+            drawBadge(g2, hudX + 235, hudY + 12, "VEÍCULOS", String.valueOf(totalCars), new Color(20, 130, 210));
+            drawBadge(g2, hudX + 315, hudY + 12, "PARADOS", String.valueOf(stoppedCars), (stoppedCars > 0) ? new Color(220, 60, 60) : new Color(40, 170, 90));
+            drawBadge(g2, hudX + 390, hudY + 12, "ESPERA", avgWait + "s", new Color(220, 120, 20));
+            drawBadge(g2, hudX + 465, hudY + 12, "SOCORRO", String.valueOf(preemptionCount), new Color(170, 30, 200));
+            drawBadge(g2, hudX + 540, hudY + 12, "DÉBITO", String.valueOf(totalCompletedPasses), new Color(30, 160, 110));
+            drawBadge(g2, hudX + 605, hudY + 12, "TEMPO", elapsedSec + "s", new Color(100, 100, 150));
 
-            int crossX = hudX + 630;
+            // Indicadores dos 4 Cruzamentos (NS e EW)
+            int crossX = hudX + 675;
             String[] crossLabels = {"NW", "NE", "SW", "SE"};
             for (int i = 0; i < 4; i++) {
                 g2.setColor(new Color(90, 105, 125));
                 g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
-                g2.drawString(crossLabels[i], crossX + (i * 58), hudY + 24);
+                g2.drawString(crossLabels[i], crossX + (i * 54), hudY + 20);
 
-                boolean isGreen = lights[i][0] == LightState.GREEN;
-                g2.setColor(isGreen ? new Color(40, 200, 90) : new Color(230, 60, 60));
-                g2.fillRoundRect(crossX + (i * 58), hudY + 30, 24, 8, 4, 4);
+                boolean isNSGreen = lights[i][0] == LightState.GREEN;
+                g2.setColor(isNSGreen ? new Color(40, 200, 90) : new Color(230, 60, 60));
+                g2.fillRoundRect(crossX + (i * 54), hudY + 26, 20, 7, 3, 3);
+
+                boolean isEWGreen = lights[i][1] == LightState.GREEN;
+                g2.setColor(isEWGreen ? new Color(40, 200, 90) : new Color(230, 60, 60));
+                g2.fillRoundRect(crossX + (i * 54) + 23, hudY + 26, 20, 7, 3, 3);
             }
         }
 
