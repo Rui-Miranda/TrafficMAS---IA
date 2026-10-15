@@ -60,7 +60,8 @@ O sistema substitui os controladores semafóricos tradicionais de temporização
 ```
 TrafficMAS---IA/
 ├── data/
-│   └── traffic_disruption_dataset.csv  # Dataset de ML gerado da simulação (3.072 instâncias)
+│   ├── traffic_disruption_dataset.csv  # Dataset de ML gerado da simulação (3.072 instâncias)
+│   └── traffic_model.bin               # Modelo binário congelado (Logistic Regression L2 + Scaler)
 ├── lib/
 │   ├── jade.jar                     # Runtime da plataforma JADE 4.5
 │   └── commons-codec-1.3.jar        # Codificação e utilitários FIPA
@@ -70,8 +71,8 @@ TrafficMAS---IA/
 │   │   ├── TrafficLightAgent.java          # Semáforos adaptativos com telemetria FIPA
 │   │   ├── VehicleAgent.java               # Viaturas regulares com deteção dinâmica de cruzamento
 │   │   ├── EmergencyVehicleAgent.java      # Viaturas prioritárias com preempção de socorro
-│   │   ├── DisruptionManagementAgent.java  # Agente preditivo de perturbações e atrito viário
-│   │   └── CentralCoordinationAgent.java   # Coordenador Central (Onda Verde e Equilíbrio FIPA)
+│   │   ├── DisruptionManagementAgent.java  # Agente preditivo ML com inferência periódica e alertas FIPA
+│   │   └── CentralCoordinationAgent.java   # Coordenador Central (Onda Verde, Equilíbrio e Reação ML)
 │   ├── environment/
 │   │   ├── HeadlessTrafficSimulator.java   # Simulador headless rápido para geração determinística de dados
 │   │   ├── IntersectionSafetyAuthority.java # Autoridade única de segurança e controlo atómico de fase
@@ -98,12 +99,13 @@ TrafficMAS---IA/
 │       ├── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
 │       ├── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (8 testes)
 │       ├── MachineLearningModelTest.java   # Suite Fase 4 (Etapa 2): Validação dos modelos de ML (14 testes)
-│       └── ModelSelectionAndPersistenceTest.java # Suite Fase 4 (Etapa 3): Seleção e persistência (12 testes)
+│       ├── ModelSelectionAndPersistenceTest.java # Suite Fase 4 (Etapa 3): Seleção e persistência (12 testes)
+│       └── MLAgentIntegrationTest.java     # Suite Fase 4 (Etapa 4): Integração ML-Agente e FIPA-ACL (15 testes)
 ├── bin/                             # Binários compilados (.class)
 ├── run.bat                          # Execução rápida da simulação (Windows)
 ├── run.ps1                          # Execução rápida da simulação (PowerShell)
-├── run_tests.bat                    # Execução das 6 suites de testes automatizados (Batch)
-├── run_tests.ps1                    # Execução das 6 suites de testes automatizados (PowerShell)
+├── run_tests.bat                    # Execução das 7 suites de testes automatizados (Batch)
+├── run_tests.ps1                    # Execução das 7 suites de testes automatizados (PowerShell)
 ├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo IEEE
 └── README.md                        # Documentação principal
 ```
@@ -136,7 +138,7 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
 
 ## 5. Execução dos Testes Automatizados (Fases 1, 2, 3 e 4)
 
-O projeto dispõe de **59 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML, a conformidade matemática dos modelos e a persistência/desserialização em disco.
+O projeto dispõe de **74 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML, a conformidade matemática dos modelos, a persistência/desserialização em disco e a integração operacional FIPA-ACL entre agentes.
 
 ### Executar Todas as Suites de Testes (Recomendado):
 ```powershell
@@ -164,6 +166,9 @@ java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar"
 
 # Fase 4 (Etapa 3): Seleção Final e Persistência do Modelo (12 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.ModelSelectionAndPersistenceTest
+
+# Fase 4 (Etapa 4): Integração Operacional ML-Agente e FIPA-ACL (15 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MLAgentIntegrationTest
 ```
 
 ---
@@ -197,7 +202,16 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" ml.FinalModelEvaluator
 
 ---
 
-## 9. Calendário Operacional e Entregas
+## 9. Integração Operacional do Machine Learning com JADE (Fase 4 — Etapa 4)
+
+Na Etapa 4, o modelo binário congelado (`data/traffic_model.bin`) opera ativamente em tempo real no sistema multiagente:
+1. **DisruptionManagementAgent**: Carrega o bundle na inicialização e executa inferência a cada 10 segundos sobre 7 features físicas recolhidas do `TrafficEnvironment`. Se a probabilidade calculada atingir o threshold congelado ($\tau = 0.40$), emite uma mensagem FIPA-ACL `DISTURBANCE_ALERT` (com debouncing e cooldown de 30s).
+2. **CentralCoordinationAgent**: Valida a integridade do alerta (cruzamento, probabilidade e prazo de validade), responde com `AGREE` e despacha uma diretiva adaptativa `CMD_ML_ADAPT_...` para atenuar o estrangulamento.
+3. **Precedência Estrita de Segurança**: Viaturas de emergência (`EmergencyVehicleAgent`) sobrepõem-se com prioridade absoluta sobre qualquer política preditiva ML, mantendo o intertravamento e o tempo de segurança dos semáforos intactos.
+
+---
+
+## 10. Calendário Operacional e Entregas
 
 * **Entrega Intermédia (30%):** **1 de Novembro** (Apresentação e Demonstração Laboratorial Obrigatória: **2 a 4 de Novembro**).
 * **Entrega Final (70%):** **3 de Janeiro** (Demonstração: 20%, Código-Fonte: 25%, Artigo Científico SCImago Q1/Q2/Q3: 25%).
