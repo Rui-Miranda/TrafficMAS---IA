@@ -70,12 +70,14 @@ public class Main {
             }
 
             // 6. Lançamento de Viaturas Regulares (Feature 3)
+            // Distribuição equilibrada pelos eixos NS e EW para cobertura dos 4 cruzamentos
             String[][] regularCars = {
-                {"Carro_01", "NS"},
-                {"Carro_02", "EW"},
-                {"Carro_03", "NS"},
-                {"Carro_04", "EW"},
-                {"Carro_05", "NS"}
+                {"Carro_01", "NS"},   // Norte -> Sul (Cruzamentos NW/SW ou NE/SE)
+                {"Carro_02", "EW"},   // Oeste -> Este (Cruzamentos NW/NE ou SW/SE)
+                {"Carro_03", "NS"},   // Norte -> Sul
+                {"Carro_04", "EW"},   // Oeste -> Este
+                {"Carro_05", "NS"},   // Norte -> Sul
+                {"Carro_06", "EW"}    // Oeste -> Este (garante equilíbrio entre eixos)
             };
 
             for (String[] carInfo : regularCars) {
