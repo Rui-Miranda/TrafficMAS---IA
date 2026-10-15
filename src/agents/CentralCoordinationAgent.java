@@ -66,9 +66,10 @@ public class CentralCoordinationAgent extends Agent {
         public final long plannedDurationMs;
         public final long offsetMs;
         public final long issuedTimestamp;
-        public String status; // "SENT", "AGREED", "REFUSED", "APPLIED"
+        public String status; // "SENT", "AGREED", "REFUSED", "APPLIED", "APPLIED_THEN_PREEMPTED"
         public String refusalReason = null;
         public long appliedTimestamp = 0;
+        public boolean wasApplied = false;
 
         public CoordinatedCommandRecord(String cmdId, String policyType, int intersectionIndex, 
                                       int targetAxis, long plannedDurationMs, long offsetMs) {
@@ -80,6 +81,7 @@ public class CentralCoordinationAgent extends Agent {
             this.offsetMs = offsetMs;
             this.issuedTimestamp = System.currentTimeMillis();
             this.status = "SENT";
+            this.wasApplied = false;
         }
     }
 
@@ -288,9 +290,6 @@ public class CentralCoordinationAgent extends Agent {
 
         ACLMessage request = new ACLMessage(ACLMessage.REQUEST);
         request.addReceiver(createAID(targetAgentName));
-        // Envia também ao agente do outro eixo do mesmo cruzamento para sincronização da autoridade
-        String otherAgentName = "Semaforo_" + ((targetAxis == 0) ? "EW" : "NS") + "_" + crossingName;
-        request.addReceiver(createAID(otherAgentName));
 
         request.setOntology("coordination-policy");
         request.setConversationId("coord-req-" + cmdId);
@@ -394,20 +393,27 @@ public class CentralCoordinationAgent extends Agent {
 
         if (msg.getPerformative() == ACLMessage.AGREE) {
             if (record != null) {
-                record.status = "AGREED";
+                if (!"APPLIED".equals(record.status) && !record.wasApplied) {
+                    record.status = "AGREED";
+                }
                 System.out.println("[CentralCoordinationAgent] Confirmação AGREE recebida para " + cmdId 
                         + " de " + msg.getSender().getLocalName());
             }
         } else if (msg.getPerformative() == ACLMessage.REFUSE) {
             if (record != null) {
-                record.status = "REFUSED";
                 record.refusalReason = params.getOrDefault("reason", "UNKNOWN");
-                System.out.println("[CentralCoordinationAgent] Rejeição REFUSE recebida para " + cmdId 
+                if (record.wasApplied || "APPLIED".equals(record.status)) {
+                    record.status = "APPLIED_THEN_PREEMPTED";
+                } else {
+                    record.status = "REFUSED";
+                }
+                System.out.println("[CentralCoordinationAgent] Rejeição/Revogação recebida para " + cmdId 
                         + " de " + msg.getSender().getLocalName() + " (Motivo: " + record.refusalReason + ")");
             }
         } else if (msg.getPerformative() == ACLMessage.INFORM && content.startsWith("APPLIED")) {
             if (record != null) {
                 record.status = "APPLIED";
+                record.wasApplied = true;
                 record.appliedTimestamp = System.currentTimeMillis();
                 lastAdherenceByIntersection.put(record.intersectionIndex, record.appliedTimestamp);
                 System.out.println("[CentralCoordinationAgent] >>> SUCESSO: Diretiva " + cmdId 
@@ -540,7 +546,9 @@ public class CentralCoordinationAgent extends Agent {
                     System.out.println("[CentralCoordinationAgent] Precedência de Emergência: Alerta preditivo em C" + 
                             (intersection + 1) + " registado mas diretiva preditiva suspensa por emergência ativa.");
                 } else {
-                    int targetAxis = (tel != null && tel.waitingEW > tel.waitingNS) ? 1 : 0;
+                    int targetAxis = params.containsKey("targetAxis") 
+                            ? Integer.parseInt(params.get("targetAxis")) 
+                            : ((tel != null && tel.waitingEW > tel.waitingNS) ? 1 : ((tel != null && tel.currentPhase != null && tel.currentPhase.contains("EW")) ? 1 : 0));
                     long duration = (probability >= 0.70) ? 6500 : 5000;
                     long seq = commandSeq.incrementAndGet();
                     String cmdId = "CMD_ML_ADAPT_" + seq;
@@ -616,6 +624,25 @@ public class CentralCoordinationAgent extends Agent {
     /** Devolve o total de alertas ML recebidos. */
     public int getMLAlertCount() {
         return mlAlertCount;
+    }
+
+    /** Devolve o estado de execução de um comando coordenado pelo seu ID. */
+    public String getCommandStatus(String cmdId) {
+        if (cmdId == null) return "UNKNOWN";
+        CoordinatedCommandRecord r = commandRecords.get(cmdId);
+        return (r != null) ? r.status : "NOT_FOUND";
+    }
+
+    /** Devolve se o comando coordenado foi efetivamente aplicado no cruzamento. */
+    public boolean isCommandApplied(String cmdId) {
+        if (cmdId == null) return false;
+        CoordinatedCommandRecord r = commandRecords.get(cmdId);
+        return (r != null) && (r.wasApplied || "APPLIED".equals(r.status) || "APPLIED_THEN_PREEMPTED".equals(r.status));
+    }
+
+    /** Devolve o registo completo de auditoria de um comando pelo seu ID. */
+    public CoordinatedCommandRecord getCommandRecord(String cmdId) {
+        return (cmdId != null) ? commandRecords.get(cmdId) : null;
     }
 
     @Override

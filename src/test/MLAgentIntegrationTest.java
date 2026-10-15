@@ -133,7 +133,15 @@ public class MLAgentIntegrationTest {
                 fail(testName, "Bundle ou componentes internos nulos.");
                 return;
             }
-            pass(testName + " (" + modelFile.length() + " bytes | " + loadedBundle.getModelName() + ")");
+            File csvFile = new File("data/traffic_disruption_dataset.csv");
+            if (csvFile.exists()) {
+                String realSha = TrafficModelBundle.computeFileSha256(csvFile);
+                if (!loadedBundle.isDatasetCompatible(realSha)) {
+                    fail(testName, "Hash do dataset CSV (" + realSha + ") incompatível com o hash gravado no modelo (" + loadedBundle.getDatasetSha256() + ")");
+                    return;
+                }
+            }
+            pass(testName + " (" + modelFile.length() + " bytes | " + loadedBundle.getModelName() + " | SHA-256 Validado: " + loadedBundle.getDatasetSha256() + ")");
         } catch (Exception e) {
             fail(testName, "Excepção ao desserializar: " + e.getMessage());
         }
@@ -523,6 +531,11 @@ public class MLAgentIntegrationTest {
         p.setParameter(Profile.MAIN_PORT, "1199"); // Porta distinta para isolamento
         p.setParameter(Profile.GUI, "false");
 
+        // Reinicia autoridades para garantir estado limpo e determinístico
+        IntersectionSafetyAuthority.resetAll();
+        IntersectionSafetyAuthority authority = IntersectionSafetyAuthority.getAuthority(0);
+        long durationBefore = authority.getCurrentGreenDuration();
+
         AgentContainer container = rt.createMainContainer(p);
 
         try {
@@ -555,29 +568,71 @@ public class MLAgentIntegrationTest {
                 return;
             }
 
-            // 3. Simula emissão do DISTURBANCE_ALERT com alta probabilidade
+            // 1. O DisruptionManagementAgent obtém features reais
+            TrafficEnvironment env = TrafficEnvironment.getInstance();
+            DisruptionManagementAgent dma = new DisruptionManagementAgent();
+            double[] realFeatures = dma.extrairFeaturesTempoReal(env, 0);
+
+            // 2. O modelo calcula a probabilidade (inferência determinística com threshold 0.40)
+            double realProb = loadedBundle.predictProbability(realFeatures);
+            double[] severeCongestionFeatures = new double[]{10.0, 6.0, 0.40, 15.0, 4.0, 1.0, 0.0};
+            double severeProb = loadedBundle.predictProbability(severeCongestionFeatures);
+
+            // Sincroniza o cruzamento no início da fase verde NS (NS_GREEN) para aplicação imediata da extensão preditiva
+            authority.applyPhaseAtomic(IntersectionSafetyAuthority.Phase.NS_GREEN);
+            int activeAxis = 0;
+
+            // 3. É enviado DISTURBANCE_ALERT com probabilidade crítica e eixo-alvo
             long now = System.currentTimeMillis();
             String alertId = "ALERT_E2E_" + now;
             ACLMessage alert = new ACLMessage(ACLMessage.INFORM);
             alert.setOntology("DISTURBANCE_ALERT");
             alert.setConversationId("conv-ml-e2e-" + now);
-            alert.setContent("alertId=" + alertId + ";intersection=0;probability=0.8800;speedMultiplier=0.60;model=LogisticRegression;threshold=0.40;horizon=60;timestamp=" + now + ";validUntil=" + (now + 60000) + ";riskType=CRITICAL_CONGESTION");
+            alert.setContent(String.format(Locale.US,
+                    "alertId=%s;intersection=0;targetAxis=%d;probability=%.4f;speedMultiplier=1.0;model=LogisticRegression;threshold=0.40;horizon=60;timestamp=%d;validUntil=%d;riskType=CRITICAL_CONGESTION",
+                    alertId, activeAxis, severeProb, now, (now + 60000)));
             alert.setSender(new jade.core.AID("AgentePerturbacoes", jade.core.AID.ISLOCALNAME));
 
-            // Executa o tratamento da mensagem FIPA
+            // 4. CentralCoordinationAgent valida o alerta e despacha 5. COORDINATION_REQUEST ao semáforo competente
             invokeHandler(coord, alert);
 
-            // Aguarda despacho da diretiva e resposta FIPA do semáforo
-            Thread.sleep(1000);
-
-            // Verifica se o alerta foi registado e a diretiva adaptativa despachada
+            // 9. O coordenador recebe a confirmação correspondente ao cmdId
             String cmdId = coord.getLastAdaptiveCommandId();
+            // Aguarda despacho, resposta AGREE (6), aplicação na autoridade (7), envio de APPLIED (8) e receção no coordenador (9)
+            long deadline = System.currentTimeMillis() + 3000;
+            while (System.currentTimeMillis() < deadline) {
+                if (cmdId == null) {
+                    cmdId = coord.getLastAdaptiveCommandId();
+                }
+                if (cmdId != null && "APPLIED".equals(coord.getCommandStatus(cmdId))) {
+                    break;
+                }
+                Thread.sleep(50);
+            }
+
             boolean alertRegistered = alertId.equals(coord.getLastMLAlertId());
             boolean directiveIssued = (cmdId != null && cmdId.startsWith("CMD_ML_ADAPT_"));
+            String cmdStatus = coord.getCommandStatus(cmdId);
+            boolean coordinationApplied = coord.isCommandApplied(cmdId);
 
-            assertTrue(testName + " (Cmd=" + cmdId + ")",
-                    alertRegistered && directiveIssued,
-                    "Falha no fluxo FIPA-ACL completo entre agentes.");
+            // 10. A duração efetiva do semáforo é comparada antes e depois
+            long durationAfter = authority.getCurrentGreenDuration();
+            boolean durationExtended = (durationAfter == 6500L);
+
+            // Demonstração adicional: Veículo de emergência no eixo transversal tem precedência estrita sobre a política preditiva
+            int emergencyAxis = 1;
+            authority.requestEmergency("Ambulancia_E2E_Test", emergencyAxis, "Ambulancia_AID");
+            boolean emergencyPreemptedPolicy = (authority.getActivePolicy() == null);
+
+            boolean fullChainSuccess = alertRegistered 
+                    && directiveIssued 
+                    && coordinationApplied 
+                    && durationExtended 
+                    && emergencyPreemptedPolicy;
+
+            assertTrue(testName + " (Cmd=" + cmdId + ", Status=" + cmdStatus + ", Dur=" + durationBefore + "ms->" + durationAfter + "ms)",
+                    fullChainSuccess,
+                    "Falha na cadeia FIPA completa (Alert=" + alertRegistered + ", Cmd=" + directiveIssued + ", Applied=" + coordinationApplied + ", Ext=" + durationExtended + ", Preempt=" + emergencyPreemptedPolicy + ")");
 
         } finally {
             try {

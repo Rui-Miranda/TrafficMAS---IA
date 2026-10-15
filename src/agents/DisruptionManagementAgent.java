@@ -157,6 +157,13 @@ public class DisruptionManagementAgent extends Agent {
             System.out.println("  • Features: " + java.util.Arrays.toString(modelBundle.getFeatureNames()));
             System.out.println("  • SHA-256 Dataset: " + modelBundle.getDatasetSha256());
 
+            File csvFile = new File("data/traffic_disruption_dataset.csv");
+            if (csvFile.exists()) {
+                String realSha = TrafficModelBundle.computeFileSha256(csvFile);
+                boolean validHash = modelBundle.isDatasetCompatible(realSha);
+                System.out.println("  • Validação Integridade Dataset CSV: " + (validHash ? "VÁLIDO (100% íntegro)" : "INCOMPATÍVEL"));
+            }
+
         } catch (Exception e) {
             System.err.println("[DisruptionManagementAgent] Erro ao carregar modelo ML: " + e.getMessage());
             mlModelLoaded = false;
@@ -211,21 +218,22 @@ public class DisruptionManagementAgent extends Agent {
         lastPredictedClass = maxPredClass;
         lastIntersectionAlerted = maxProbIntersection;
 
-        // Calcula o speed multiplier adaptativo com base na probabilidade máxima
-        double speedMultiplier = calcularMultiplicadorVelocidade(maxProbability);
+        // O multiplicador de velocidade físico é derivado exclusivamente do ambiente real (atrito/clima/obras)
+        // e é independente da previsão do modelo ML, evitando loops circulares e desaceleração artificial.
+        double environmentalSpeedMultiplier = env.getEnvironmentalSpeedMultiplier();
 
-        // Atualiza HUD
+        // Atualiza HUD com diagnóstico preditivo sem alterar velocidade física dos veículos
         int probPercent = (int) Math.round(maxProbability * 100);
         String nivel = (probPercent >= 70) ? "CRÍTICO" : ((probPercent >= 40) ? "MODERADO" : "BAIXO");
         String hudMsg = String.format(Locale.US, "ML Preditivo: %d%% risco (%s) [C%d]",
                 probPercent, nivel, (maxProbIntersection + 1));
-        env.setDisruptionNotice(hudMsg, speedMultiplier);
+        env.setMLPredictionNotice(hudMsg);
 
         // Emite alerta DISTURBANCE_ALERT se a probabilidade ultrapassa o threshold e o cooldown foi respeitado
         if (maxPredClass == 1) {
             long now = System.currentTimeMillis();
             if ((now - lastAlertTimestamp) >= ALERT_COOLDOWN_MS) {
-                emitirDisturbanceAlert(maxProbIntersection, maxProbability, speedMultiplier);
+                emitirDisturbanceAlert(maxProbIntersection, maxProbability, environmentalSpeedMultiplier);
                 lastAlertTimestamp = now;
                 totalAlertsSent++;
             } else {
@@ -248,30 +256,30 @@ public class DisruptionManagementAgent extends Agent {
      *   [6] incidentPresent   — Presença de incidente (0=NÃO, 1=SIM)
      */
     public double[] extrairFeaturesTempoReal(TrafficEnvironment env, int intersectionIndex) {
-        // Traffic Volume: soma dos veículos em aproximação nos dois eixos
+        // [0] Traffic Volume: soma dos veículos em aproximação nos dois eixos (dist <= 220px)
         int approachingNS = env.getApproachingVehiclesCount(intersectionIndex, 0);
         int approachingEW = env.getApproachingVehiclesCount(intersectionIndex, 1);
         int trafficVolume = approachingNS + approachingEW;
 
-        // Queue Length: soma dos veículos em fila de espera nos dois eixos
+        // [1] Queue Length: soma dos veículos em fila de espera nos dois eixos (dist <= 220px, speed < 0.2)
         int waitingNS = env.getWaitingVehiclesCount(intersectionIndex, 0);
         int waitingEW = env.getWaitingVehiclesCount(intersectionIndex, 1);
         int queueLength = waitingNS + waitingEW;
 
-        // Average Speed: proxy baseado na fila de espera (compatível com o HeadlessTrafficSimulator)
-        double averageSpeed = Math.max(0.0, 2.0 - 0.3 * queueLength);
+        // [2] Average Speed: velocidade média física real medida no cruzamento (px/tick)
+        double averageSpeed = env.getAverageSpeed(intersectionIndex);
 
-        // Average Waiting Time: tempo médio de espera global da rede
-        double averageWaitingTime = env.getAverageWaitSeconds();
+        // [3] Average Waiting Time: tempo médio real de espera das viaturas imobilizadas na fila (segundos)
+        double averageWaitingTime = env.getAverageWaitingTime(intersectionIndex);
 
-        // Road Capacity: constante (4 faixas por artéria)
-        int roadCapacity = 4;
+        // [4] Road Capacity: capacidade física da via (4 faixas, ou 2 se houver supressão por obras/acidente)
+        int roadCapacity = env.getRoadCapacity();
 
-        // Weather Condition: derivado do estado de perturbação reportado no HUD
-        int weatherCondition = inferirCondicaoClimatica(env.getDisruptionNotice());
+        // [5] Weather Condition: condição meteorológica física atual (0=SECO, 1=CHUVA, 2=NEVOEIRO)
+        int weatherCondition = env.getWeatherCondition();
 
-        // Incident Present: derivado do estado de perturbação reportado no HUD
-        int incidentPresent = inferirPresencaIncidente(env.getDisruptionNotice());
+        // [6] Incident Present: presença física de obras/acidente na via (0=NÃO, 1=SIM)
+        int incidentPresent = env.getIncidentPresent();
 
         return new double[] {
             trafficVolume, queueLength, averageSpeed, averageWaitingTime,

@@ -8,7 +8,7 @@ if (-not (Test-Path "bin")) {
 }
 
 Write-Host "[1/2] A compilar fontes Java..." -ForegroundColor Yellow
-javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java
+javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERRO] Falha durante a compilação do projeto!" -ForegroundColor Red

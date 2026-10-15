@@ -83,4 +83,39 @@ public class TrafficModelBundle implements Serializable {
                 modelName, modelVersion, predictionHorizonSeconds, decisionThreshold,
                 featureNames != null ? featureNames.length : 0, new Date(trainingTimestamp));
     }
+
+    /**
+     * Valida se um hash SHA-256 fornecido é compatível com o hash do dataset congelado no bundle.
+     */
+    public boolean isDatasetCompatible(String csvSha256) {
+        if (datasetSha256 == null || csvSha256 == null) return false;
+        return datasetSha256.trim().equalsIgnoreCase(csvSha256.trim());
+    }
+
+    /**
+     * Calcula o hash criptográfico SHA-256 real de um ficheiro em disco.
+     */
+    public static String computeFileSha256(java.io.File file) throws java.io.IOException {
+        if (file == null || !file.exists() || !file.canRead()) {
+            throw new java.io.FileNotFoundException("Ficheiro inacessível para cálculo de SHA-256: " + file);
+        }
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            try (java.io.InputStream fis = new java.io.BufferedInputStream(new java.io.FileInputStream(file))) {
+                byte[] buffer = new byte[8192];
+                int n;
+                while ((n = fis.read(buffer)) != -1) {
+                    md.update(buffer, 0, n);
+                }
+            }
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new RuntimeException("Algoritmo SHA-256 não disponível no ambiente Java", e);
+        }
+    }
 }

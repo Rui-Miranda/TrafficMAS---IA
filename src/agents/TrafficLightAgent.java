@@ -128,8 +128,8 @@ public class TrafficLightAgent extends Agent {
      * Configura os callbacks da autoridade de segurança para despachar mensagens FIPA-ACL.
      */
     private void configurarListenerAutoridade() {
-        // Apenas o agente cujo eixo corresponde à emergência (ou o NS) responde
-        authority.setPhaseListener(new IntersectionSafetyAuthority.EmergencyPhaseListener() {
+        // Regista o agente como ouvinte da autoridade do cruzamento
+        authority.addPhaseListener(new IntersectionSafetyAuthority.EmergencyPhaseListener() {
             @Override
             public void onRequestReceived(EmergencyRequest req) {
                 // A receção é confirmada diretamente no processamento da mensagem
@@ -167,6 +167,11 @@ public class TrafficLightAgent extends Agent {
 
             @Override
             public void onCoordinationApplied(IntersectionSafetyAuthority.CoordinationPolicy policy) {
+                // Apenas o semáforo responsável pelo eixo-alvo da diretiva despacha a confirmação de aplicação
+                if (policy.targetAxis != axis) {
+                    return;
+                }
+
                 // Notifica o coordenador central de que a diretiva foi efetivamente executada
                 System.out.println("[TrafficLightAgent " + direction + "] >>> Diretiva " + policy.cmdId 
                         + " APLICADA no Cruzamento C" + (intersectionIndex + 1) + ". A notificar Coordenador Central...");
@@ -187,6 +192,11 @@ public class TrafficLightAgent extends Agent {
 
             @Override
             public void onCoordinationRejected(IntersectionSafetyAuthority.CoordinationPolicy policy, String reason) {
+                // Apenas o semáforo responsável pelo eixo-alvo notifica rejeição/cancelamento
+                if (policy.targetAxis != axis) {
+                    return;
+                }
+
                 System.out.println("[TrafficLightAgent " + direction + "] Diretiva " + policy.cmdId 
                         + " REJEITADA/ABORTADA no Cruzamento C" + (intersectionIndex + 1) + ". Motivo: " + reason);
 

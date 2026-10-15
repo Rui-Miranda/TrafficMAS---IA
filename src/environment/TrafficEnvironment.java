@@ -138,11 +138,72 @@ public class TrafficEnvironment {
     /**
      * Atualiza a condição climática / perturbação inferida por Machine Learning (Feature 5).
      *
+    /**
+     * Atualiza a condição climática / perturbação inferida por Machine Learning (Feature 5).
+     *
      * @param notice Mensagem explicativa da perturbação
      * @param speedMultiplier Fator multiplicador de velocidade (ex: 0.70 para piso molhado)
      */
     public void setDisruptionNotice(String notice, double speedMultiplier) {
         CitySimulationGUI.getInstance().setDisruptionNotice(notice, speedMultiplier);
+    }
+
+    /**
+     * Atualiza a indicação HUD de diagnóstico preditivo ML sem alterar a velocidade física dos veículos.
+     */
+    public void setMLPredictionNotice(String notice) {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            gui.setMLPredictionNotice(notice);
+        }
+    }
+
+    /**
+     * Obtém o multiplicador de atrito/velocidade imposto pelo ambiente físico real (ex: chuva, obras).
+     */
+    public double getEnvironmentalSpeedMultiplier() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getGlobalSpeedMultiplier() : 1.0;
+    }
+
+    /**
+     * Obtém a velocidade média real medida das viaturas em aproximação a um cruzamento (px/tick).
+     */
+    public double getAverageSpeed(int intersectionIndex) {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getAverageSpeed(intersectionIndex) : 2.4;
+    }
+
+    /**
+     * Obtém o tempo médio real de espera das viaturas imobilizadas na fila de um cruzamento (segundos).
+     */
+    public double getAverageWaitingTime(int intersectionIndex) {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getAverageWaitingTime(intersectionIndex) : 0.0;
+    }
+
+    /**
+     * Obtém a condição climática física atual (0=SECO, 1=CHUVA, 2=NEVOEIRO).
+     */
+    public int getWeatherCondition() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getWeatherCondition() : 0;
+    }
+
+    /**
+     * Obtém a presença física de incidente ou obras (0=NÃO, 1=SIM).
+     */
+    public int getIncidentPresent() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getIncidentPresent() : 0;
+    }
+
+    /**
+     * Obtém a capacidade física da via (4 faixas normais, 2 faixas com supressão de obras).
+     */
+    public int getRoadCapacity() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getRoadCapacity() : 4;
     }
 
     /**

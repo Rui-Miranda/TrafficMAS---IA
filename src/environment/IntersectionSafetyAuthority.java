@@ -189,8 +189,8 @@ public class IntersectionSafetyAuthority {
     private CoordinationPolicy activePolicy = null;
     private final java.util.Set<String> processedCmdIds = new java.util.HashSet<>();
 
-    // Listener para despacho FIPA
-    private EmergencyPhaseListener phaseListener;
+    // Lista de listeners para despacho FIPA
+    private final java.util.List<EmergencyPhaseListener> phaseListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     /**
      * Construtor da autoridade do cruzamento.
@@ -208,7 +208,52 @@ public class IntersectionSafetyAuthority {
     }
 
     public synchronized void setPhaseListener(EmergencyPhaseListener listener) {
-        this.phaseListener = listener;
+        this.phaseListeners.clear();
+        if (listener != null) {
+            this.phaseListeners.add(listener);
+        }
+    }
+
+    public synchronized void addPhaseListener(EmergencyPhaseListener listener) {
+        if (listener != null && !this.phaseListeners.contains(listener)) {
+            this.phaseListeners.add(listener);
+        }
+    }
+
+    private void fireRequestReceived(EmergencyRequest req) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onRequestReceived(req); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void fireRequestAccepted(EmergencyRequest req) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onRequestAccepted(req); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void fireGreenGranted(EmergencyRequest req) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onGreenGranted(req); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void fireEmergencyCleared(EmergencyRequest req) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onEmergencyCleared(req); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void fireCoordinationApplied(CoordinationPolicy policy) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onCoordinationApplied(policy); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void fireCoordinationRejected(CoordinationPolicy policy, String reason) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onCoordinationRejected(policy, reason); } catch (Throwable ignored) {}
+        }
     }
 
     public synchronized int getIntersectionIndex() {
@@ -271,9 +316,7 @@ public class IntersectionSafetyAuthority {
 
         // Precedência de emergência ativa em eixo conflitual
         if (currentlyServingEmergency != null && currentlyServingEmergency.axis != policy.targetAxis) {
-            if (phaseListener != null) {
-                phaseListener.onCoordinationRejected(policy, "REJECTED_EMERGENCY_PRIORITY");
-            }
+            fireCoordinationRejected(policy, "REJECTED_EMERGENCY_PRIORITY");
             return "REJECTED_EMERGENCY_PRIORITY";
         }
 
@@ -292,9 +335,7 @@ public class IntersectionSafetyAuthority {
             policy.setApplied(true);
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Diretiva de coordenação " + policy.cmdId + " aplicada de imediato na fase verde ativa.");
-            if (phaseListener != null) {
-                phaseListener.onCoordinationApplied(policy);
-            }
+            fireCoordinationApplied(policy);
         }
 
         return "ACCEPTED";
@@ -307,9 +348,7 @@ public class IntersectionSafetyAuthority {
         if (activePolicy != null) {
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Diretiva de coordenação " + activePolicy.cmdId + " cancelada. Motivo: " + reason);
-            if (phaseListener != null) {
-                phaseListener.onCoordinationRejected(activePolicy, reason);
-            }
+            fireCoordinationRejected(activePolicy, reason);
             activePolicy = null;
         }
     }
@@ -373,13 +412,11 @@ public class IntersectionSafetyAuthority {
         EmergencyRequest existing = activeRequestsByVehicle.get(vehicleId);
         if (existing != null && existing.getStatus() != EmergencyStatus.CONCLUIDO) {
             // Pedido repetido: não reinicia o ciclo nem duplica na fila; apenas confirma receção
-            if (phaseListener != null) {
-                phaseListener.onRequestReceived(existing);
-                if (existing.getStatus() == EmergencyStatus.VERDE_CONCEDIDO) {
-                    phaseListener.onGreenGranted(existing);
-                } else if (existing.getStatus() == EmergencyStatus.ACEITE) {
-                    phaseListener.onRequestAccepted(existing);
-                }
+            fireRequestReceived(existing);
+            if (existing.getStatus() == EmergencyStatus.VERDE_CONCEDIDO) {
+                fireGreenGranted(existing);
+            } else if (existing.getStatus() == EmergencyStatus.ACEITE) {
+                fireRequestAccepted(existing);
             }
             return existing;
         }
@@ -390,15 +427,11 @@ public class IntersectionSafetyAuthority {
         emergencyQueue.add(newReq);
 
         // Notifica confirmação 1: PEDIDO RECEBIDO
-        if (phaseListener != null) {
-            phaseListener.onRequestReceived(newReq);
-        }
+        fireRequestReceived(newReq);
 
         // 3. Avalia aceitação imediata
         newReq.setStatus(EmergencyStatus.ACEITE);
-        if (phaseListener != null) {
-            phaseListener.onRequestAccepted(newReq);
-        }
+        fireRequestAccepted(newReq);
 
         // Precedência Absoluta de Emergência: anula qualquer política de coordenação conflitual
         if (activePolicy != null && activePolicy.targetAxis != axis) {
@@ -437,9 +470,7 @@ public class IntersectionSafetyAuthority {
     private synchronized void concluirEmergenciaAtual() {
         if (currentlyServingEmergency != null) {
             currentlyServingEmergency.setStatus(EmergencyStatus.CONCLUIDO);
-            if (phaseListener != null) {
-                phaseListener.onEmergencyCleared(currentlyServingEmergency);
-            }
+            fireEmergencyCleared(currentlyServingEmergency);
             activeRequestsByVehicle.remove(currentlyServingEmergency.vehicleId);
             currentlyServingEmergency = null;
         }
@@ -473,9 +504,7 @@ public class IntersectionSafetyAuthority {
         if ((reqAxis == 0 && currentPhase == Phase.NS_GREEN) || (reqAxis == 1 && currentPhase == Phase.EW_GREEN)) {
             if (currentlyServingEmergency.getStatus() != EmergencyStatus.VERDE_CONCEDIDO) {
                 currentlyServingEmergency.setStatus(EmergencyStatus.VERDE_CONCEDIDO);
-                if (phaseListener != null) {
-                    phaseListener.onGreenGranted(currentlyServingEmergency);
-                }
+                fireGreenGranted(currentlyServingEmergency);
             }
             // Estende o verde para garantir passagem contínua da viatura
             this.phaseStartMillis = System.currentTimeMillis();
@@ -548,18 +577,14 @@ public class IntersectionSafetyAuthority {
                             targetNextPhase = null;
                             if (currentlyServingEmergency.getStatus() != EmergencyStatus.VERDE_CONCEDIDO) {
                                 currentlyServingEmergency.setStatus(EmergencyStatus.VERDE_CONCEDIDO);
-                                if (phaseListener != null) {
-                                    phaseListener.onGreenGranted(currentlyServingEmergency);
-                                }
+                                fireGreenGranted(currentlyServingEmergency);
                             }
                         } else {
                             applyPhaseAtomic(Phase.NS_GREEN);
                             targetNextPhase = null;
                             if (currentlyServingEmergency.getStatus() != EmergencyStatus.VERDE_CONCEDIDO) {
                                 currentlyServingEmergency.setStatus(EmergencyStatus.VERDE_CONCEDIDO);
-                                if (phaseListener != null) {
-                                    phaseListener.onGreenGranted(currentlyServingEmergency);
-                                }
+                                fireGreenGranted(currentlyServingEmergency);
                             }
                         }
                     } else {
@@ -574,9 +599,7 @@ public class IntersectionSafetyAuthority {
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                                         + "] Diretiva de coordenação " + activePolicy.cmdId 
                                         + " aplicada com sucesso ao abrir fase EW_GREEN (" + currentGreenDuration + "ms).");
-                                if (phaseListener != null) {
-                                    phaseListener.onCoordinationApplied(activePolicy);
-                                }
+                                fireCoordinationApplied(activePolicy);
                                 activePolicy = null;
                             } else {
                                 this.currentGreenDuration = calcularTempoVerdeAdaptativo(waitingVehiclesEW);
@@ -589,9 +612,7 @@ public class IntersectionSafetyAuthority {
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                                         + "] Diretiva de coordenação " + activePolicy.cmdId 
                                         + " aplicada com sucesso ao abrir fase NS_GREEN (" + currentGreenDuration + "ms).");
-                                if (phaseListener != null) {
-                                    phaseListener.onCoordinationApplied(activePolicy);
-                                }
+                                fireCoordinationApplied(activePolicy);
                                 activePolicy = null;
                             } else {
                                 this.currentGreenDuration = calcularTempoVerdeAdaptativo(waitingVehiclesNS);

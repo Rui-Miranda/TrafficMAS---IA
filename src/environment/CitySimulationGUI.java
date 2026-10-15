@@ -104,6 +104,9 @@ public class CitySimulationGUI extends JFrame {
     private int preemptionCount = 0;
     private String disruptionNotice = "Condições Normais (Atrito 100%)";
     private double globalSpeedMultiplier = 1.0;
+    private int weatherCondition = 0; // 0=SECO, 1=CHUVA, 2=NEVOEIRO
+    private boolean incidentPresent = false;
+    private String mlPredictionNotice = "ML Preditivo: Operacional";
 
     public CitySimulationGUI() {
         this(java.awt.GraphicsEnvironment.isHeadless());
@@ -312,6 +315,68 @@ public class CitySimulationGUI extends JFrame {
     public synchronized void setDisruptionNotice(String notice, double speedFactor) {
         this.disruptionNotice = notice;
         this.globalSpeedMultiplier = Math.max(0.4, Math.min(1.2, speedFactor));
+        if (notice != null) {
+            String lower = notice.toLowerCase();
+            if (lower.contains("chuva") || lower.contains("rain") || lower.contains("escorregadi")) {
+                this.weatherCondition = 1;
+            } else if (lower.contains("nevoeiro") || lower.contains("fog") || lower.contains("visibilidade")) {
+                this.weatherCondition = 2;
+            } else {
+                this.weatherCondition = 0;
+            }
+            this.incidentPresent = (lower.contains("obras") || lower.contains("acident") || lower.contains("incident")
+                    || lower.contains("supressão") || lower.contains("roadwork"));
+        }
+    }
+
+    public synchronized void setMLPredictionNotice(String notice) {
+        this.mlPredictionNotice = notice;
+    }
+
+    public synchronized String getMLPredictionNotice() {
+        return mlPredictionNotice;
+    }
+
+    public synchronized int getWeatherCondition() {
+        return weatherCondition;
+    }
+
+    public synchronized int getIncidentPresent() {
+        return incidentPresent ? 1 : 0;
+    }
+
+    public synchronized int getRoadCapacity() {
+        return incidentPresent ? 2 : 4;
+    }
+
+    public synchronized double getAverageSpeed(int interIdx) {
+        int volume = 0;
+        double sumSpeed = 0.0;
+        for (VisualVehicle v : vehicles) {
+            if (v.inIntersection) continue;
+            double dist = getDistanceToTargetStopLine(v);
+            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0) {
+                volume++;
+                sumSpeed += v.currentSpeed;
+            }
+        }
+        return (volume > 0) ? Math.round((sumSpeed / volume) * 100.0) / 100.0 : (2.4 * globalSpeedMultiplier);
+    }
+
+    public synchronized double getAverageWaitingTime(int interIdx) {
+        int queue = 0;
+        double sumWait = 0.0;
+        long now = System.currentTimeMillis();
+        for (VisualVehicle v : vehicles) {
+            if (v.inIntersection) continue;
+            double dist = getDistanceToTargetStopLine(v);
+            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0 && v.currentSpeed < 0.2) {
+                queue++;
+                double waitSec = (v.currentStopStartMillis > 0) ? ((now - v.currentStopStartMillis) / 1000.0) : 0.0;
+                sumWait += waitSec;
+            }
+        }
+        return (queue > 0) ? Math.round((sumWait / queue) * 10.0) / 10.0 : 0.0;
     }
 
     public synchronized String getDisruptionNotice() {
@@ -982,12 +1047,13 @@ public class CitySimulationGUI extends JFrame {
             g2.setFont(new Font("Segoe UI", Font.PLAIN, 10));
             g2.drawString("Autonomous 4-Lane City Control (ISPGaya)", hudX + 16, hudY + 36);
 
-            // Linha 2: Status do Agente de Perturbações (Feature 5)
+            // Linha 2: Status do Agente de Perturbações (Feature 5) e Previsão ML
             boolean hasAlert = globalSpeedMultiplier < 0.95;
             g2.setColor(hasAlert ? new Color(220, 50, 50) : new Color(30, 140, 60));
             g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
-            String statusPrefix = hasAlert ? "⚠️ [IA-ML ALERTA] " : "✔ [IA-ML NORMAL] ";
-            g2.drawString(statusPrefix + disruptionNotice, hudX + 16, hudY + 58);
+            String statusPrefix = hasAlert ? "⚠️ [AMBIENTE] " : "✔ [AMBIENTE] ";
+            String mlText = (mlPredictionNotice != null && !mlPredictionNotice.isEmpty()) ? " | " + mlPredictionNotice : "";
+            g2.drawString(statusPrefix + disruptionNotice + mlText, hudX + 16, hudY + 58);
 
             int totalCars = vehicles.size();
             long stoppedCars = vehicles.stream().filter(v -> v.currentSpeed < 0.2).count();
