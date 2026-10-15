@@ -106,11 +106,17 @@ public class CitySimulationGUI extends JFrame {
     private double globalSpeedMultiplier = 1.0;
 
     public CitySimulationGUI() {
-        super("TrafficMAS — Intelligent Multi-Agent Urban Simulation (Kinematic)");
-        setSize(980, 1010);
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setLocationRelativeTo(null);
-        setResizable(false);
+        this(java.awt.GraphicsEnvironment.isHeadless());
+    }
+
+    public CitySimulationGUI(boolean headless) {
+        if (!headless) {
+            setTitle("TrafficMAS — Intelligent Multi-Agent Urban Simulation (Kinematic)");
+            setSize(980, 1010);
+            setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+            setLocationRelativeTo(null);
+            setResizable(false);
+        }
 
         simulationStartMillis = System.currentTimeMillis();
 
@@ -120,18 +126,20 @@ public class CitySimulationGUI extends JFrame {
             lights[i][1] = (i % 2 == 0) ? LightState.RED : LightState.GREEN;
         }
 
-        CityPanel panel = new CityPanel();
-        panel.setDoubleBuffered(true);
-        add(panel);
+        if (!headless) {
+            CityPanel panel = new CityPanel();
+            panel.setDoubleBuffered(true);
+            add(panel);
 
-        // Loop de simulação a ~30 FPS
-        Timer timer = new Timer(30, e -> {
-            tickCounter++;
-            calculateFps();
-            updatePositions();
-            panel.repaint();
-        });
-        timer.start();
+            // Loop de simulação a ~30 FPS
+            Timer timer = new Timer(30, e -> {
+                tickCounter++;
+                calculateFps();
+                updatePositions();
+                panel.repaint();
+            });
+            timer.start();
+        }
     }
 
     private void calculateFps() {
@@ -144,10 +152,17 @@ public class CitySimulationGUI extends JFrame {
         }
     }
 
+    public static synchronized CitySimulationGUI peekInstance() {
+        return instance;
+    }
+
     public static synchronized CitySimulationGUI getInstance() {
         if (instance == null) {
-            instance = new CitySimulationGUI();
-            SwingUtilities.invokeLater(() -> instance.setVisible(true));
+            boolean headless = java.awt.GraphicsEnvironment.isHeadless();
+            instance = new CitySimulationGUI(headless);
+            if (!headless) {
+                SwingUtilities.invokeLater(() -> instance.setVisible(true));
+            }
         }
         return instance;
     }
@@ -155,6 +170,7 @@ public class CitySimulationGUI extends JFrame {
     public synchronized void setTrafficLight(int intersectionIndex, int axis, LightState state) {
         if (intersectionIndex >= 0 && intersectionIndex < 4 && axis >= 0 && axis <= 1) {
             lights[intersectionIndex][axis] = state;
+            IntersectionSafetyAuthority.assertSafetyInvariant(lights[intersectionIndex][0], lights[intersectionIndex][1]);
         }
     }
 
@@ -288,10 +304,8 @@ public class CitySimulationGUI extends JFrame {
     public synchronized void triggerEmergencyPreemption(int interIdx, int axis) {
         if (interIdx >= 0 && interIdx < 4 && axis >= 0 && axis <= 1) {
             preemptionCount++;
-            int oppositeAxis = (axis == 0) ? 1 : 0;
-            lights[interIdx][oppositeAxis] = LightState.RED;
-            lights[interIdx][axis] = LightState.GREEN;
-            System.out.println("[CitySimulationGUI] Preempção de emergência aplicada no Cruzamento C" + (interIdx + 1) + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
+            IntersectionSafetyAuthority.getAuthority(interIdx).requestEmergency("MANUAL_EMERGENCY", axis, null);
+            System.out.println("[CitySimulationGUI] Preempção de emergência encaminhada para a Autoridade de Segurança do Cruzamento C" + (interIdx + 1) + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
         }
     }
 
@@ -404,7 +418,11 @@ public class CitySimulationGUI extends JFrame {
             boolean shouldBrakeForYellow = (nextLight == LightState.YELLOW && distToStopLine <= 55 && distToStopLine > 15);
             boolean shouldBrakeForRed = (nextLight == LightState.RED && distToStopLine <= 65);
 
-            if (!v.isEmergency && (blockedByLeader || shouldBrakeForYellow || shouldBrakeForRed)) {
+            // Viatura de emergência abranda de forma cautelosa se o semáforo ainda não concedeu verde
+            boolean isEmergencyBraking = v.isEmergency && (shouldBrakeForRed || (shouldBrakeForYellow && distToStopLine <= 40));
+            boolean shouldBrake = blockedByLeader || (v.isEmergency ? isEmergencyBraking : (shouldBrakeForYellow || shouldBrakeForRed));
+
+            if (shouldBrake) {
                 v.isBraking = true;
                 double limitDist = blockedByLeader ? (distToLeader - 32.0) : distToStopLine;
 

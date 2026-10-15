@@ -113,7 +113,17 @@ public class TrafficEnvironment {
      * @param axis Eixo pelo qual circula a viatura de socorro
      */
     public void triggerEmergencyPreemption(int intersectionIndex, int axis) {
-        CitySimulationGUI.getInstance().triggerEmergencyPreemption(intersectionIndex, axis);
+        IntersectionSafetyAuthority.getAuthority(intersectionIndex).requestEmergency("MANUAL_EMERGENCY", axis, null);
+    }
+
+    /**
+     * Obtém a autoridade única de segurança e controlo de fases do cruzamento.
+     *
+     * @param intersectionIndex Índice do cruzamento (0 a 3)
+     * @return Instância de {@link IntersectionSafetyAuthority}
+     */
+    public IntersectionSafetyAuthority getIntersectionAuthority(int intersectionIndex) {
+        return IntersectionSafetyAuthority.getAuthority(intersectionIndex);
     }
 
     /**

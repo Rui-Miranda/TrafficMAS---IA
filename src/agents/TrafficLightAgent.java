@@ -1,7 +1,10 @@
 package agents;
 
 import environment.CitySimulationGUI;
+import environment.IntersectionSafetyAuthority;
+import environment.IntersectionSafetyAuthority.EmergencyRequest;
 import environment.TrafficEnvironment;
+import jade.core.AID;
 import jade.core.Agent;
 import jade.core.behaviours.CyclicBehaviour;
 import jade.core.behaviours.TickerBehaviour;
@@ -13,13 +16,19 @@ import jade.domain.FIPAException;
 import jade.lang.acl.ACLMessage;
 
 /**
- * Agente Semáforo Inteligente e Adaptativo (Features 2, 6 e 7).
+ * Agente Semáforo Inteligente e Adaptativo com Segurança de Fases (Fase 1).
  *
- * Cada interseção é regulada por agentes semáforo que:
- * - Adaptam em tempo real a duração dos tempos de verde e vermelho consoante o volume de tráfego (Feature 7).
- * - Garantem a preempção estrita e prioritária para viaturas de socorro (Feature 6).
- * - Registam as suas competências no Directory Facilitator (DF / Páginas Amarelas do JADE).
- * - Coordenam as fases com garantia de intertravamento seguro (sem conflito de verdes simultâneos).
+ * Características arquiteturais:
+ * 1. Preserva os 8 agentes semáforo (2 por cruzamento: NS e EW).
+ * 2. Delega a transição física das fases na {@link IntersectionSafetyAuthority},
+ *    assegurando UMA ÚNICA AUTORIDADE de decisão por cruzamento.
+ * 3. Garante o invariante: NUNCA existem verdes simultâneos em eixos incompatíveis.
+ * 4. Transições obrigatórias: Verde -> Amarelo (1500ms) -> All-Red (1000ms) -> Novo Verde.
+ * 5. Comunicação FIPA-ACL em três etapas distintas:
+ *    - RECEBIDO (CONFIRM)
+ *    - ACEITE (AGREE)
+ *    - VERDE_CONCEDIDO (INFORM)
+ * 6. Suporte a desimpedimento de emergência ("emergency-cleared") e restauro adaptativo.
  *
  * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya
  */
@@ -28,18 +37,8 @@ public class TrafficLightAgent extends Agent {
     private String direction;
     private int intersectionIndex = 0; // 0=NW, 1=NE, 2=SW, 3=SE
     private int axis = 0; // 0=Norte-Sul, 1=Este-Oeste
-    private CitySimulationGUI.LightState currentState = CitySimulationGUI.LightState.RED;
 
-    // Estados do ciclo semafórico adaptativo (apenas o eixo coordenador NS gere o ciclo do cruzamento)
-    private enum Phase {
-        NS_GREEN, NS_YELLOW, ALL_RED_1, EW_GREEN, EW_YELLOW, ALL_RED_2
-    }
-
-    private Phase currentPhase = Phase.NS_GREEN;
-    private long phaseStartMillis = 0;
-    private long currentGreenDuration = 4000; // Duração base adaptativa (ms)
-    private boolean emergencyOverride = false;
-    private long emergencyReleaseMillis = 0;
+    private IntersectionSafetyAuthority authority;
 
     @Override
     protected void setup() {
@@ -54,34 +53,32 @@ public class TrafficLightAgent extends Agent {
             this.direction = "Desconhecida";
         }
 
-        // 1. Registo formal no Directory Facilitator (DFService - Páginas Amarelas JADE)
+        // 1. Obter a autoridade única do cruzamento
+        this.authority = IntersectionSafetyAuthority.getAuthority(intersectionIndex);
+
+        // 2. Registo no Directory Facilitator (DFService - Páginas Amarelas)
         registarNoDF();
 
-        // 2. Configurar estado luminoso inicial no ambiente de tráfego
-        TrafficEnvironment env = TrafficEnvironment.getInstance();
-        if (axis == 0) {
-            currentState = CitySimulationGUI.LightState.GREEN;
-            currentPhase = Phase.NS_GREEN;
-        } else {
-            currentState = CitySimulationGUI.LightState.RED;
-        }
-        env.setTrafficLight(intersectionIndex, axis, currentState);
-        phaseStartMillis = System.currentTimeMillis();
+        // 3. Registo de listener na autoridade para envio de confirmações FIPA quando o verde for efetivamente concedido
+        configurarListenerAutoridade();
 
         System.out.println("[TrafficLightAgent] Semáforo " + direction + " (Cruzamento C" + (intersectionIndex + 1) 
-                + " | Eixo " + (axis == 0 ? "NS" : "EW") + ") registado e em funcionamento adaptativo.");
+                + " | Eixo " + (axis == 0 ? "NS" : "EW") + ") operacional sob controlo da Autoridade de Segurança.");
 
-        // 3. Comportamento Adaptativo: O agente do eixo NS (axis == 0) assume a coordenação das fases da interseção
+        // 4. Condução do relógio da máquina de estados: o agente do eixo NS (axis == 0) gere o tick periódico do cruzamento
         if (axis == 0) {
-            addBehaviour(new TickerBehaviour(this, 500) {
+            addBehaviour(new TickerBehaviour(this, 100) {
                 @Override
                 protected void onTick() {
-                    gerirCicloSemaforicoAdaptativo();
+                    TrafficEnvironment env = TrafficEnvironment.getInstance();
+                    int waitingNS = env.getWaitingVehiclesCount(intersectionIndex, 0);
+                    int waitingEW = env.getWaitingVehiclesCount(intersectionIndex, 1);
+                    authority.updateTick(waitingNS, waitingEW);
                 }
             });
         }
 
-        // 4. Comportamento Cíclico: Receção de pedidos FIPA-ACL (Veículos e Socorro)
+        // 5. Comportamento Cíclico: Receção e tratamento de mensagens FIPA-ACL
         addBehaviour(new CyclicBehaviour(this) {
             @Override
             public void action() {
@@ -96,7 +93,50 @@ public class TrafficLightAgent extends Agent {
     }
 
     /**
-     * Regista o semáforo no serviço de páginas amarelas do JADE.
+     * Configura os callbacks da autoridade de segurança para despachar mensagens FIPA-ACL.
+     */
+    private void configurarListenerAutoridade() {
+        // Apenas o agente cujo eixo corresponde à emergência (ou o NS) responde
+        authority.setPhaseListener(new IntersectionSafetyAuthority.EmergencyPhaseListener() {
+            @Override
+            public void onRequestReceived(EmergencyRequest req) {
+                // A receção é confirmada diretamente no processamento da mensagem
+            }
+
+            @Override
+            public void onRequestAccepted(EmergencyRequest req) {
+                // A aceitação é confirmada diretamente no processamento da mensagem
+            }
+
+            @Override
+            public void onGreenGranted(EmergencyRequest req) {
+                // Quando o semáforo atinge EFETIVAMENTE o estado VERDE seguro para este eixo
+                if (req.axis == axis && req.senderAID != null) {
+                    System.out.println("[TrafficLightAgent " + direction + "] >>> VERDE CONCEDIDO EFETIVADO no Cruzamento C" 
+                            + (intersectionIndex + 1) + ". A notificar viatura " + req.vehicleId + "...");
+
+                    ACLMessage grantedMsg = new ACLMessage(ACLMessage.INFORM);
+                    grantedMsg.addReceiver(new AID(req.senderAID, AID.ISLOCALNAME));
+                    grantedMsg.setOntology("emergency-preemption");
+                    grantedMsg.setConversationId("emerg-granted-" + req.vehicleId);
+                    grantedMsg.setContent("VERDE_CONCEDIDO: Cruzamento C" + (intersectionIndex + 1) 
+                            + " com passagem segura garantida no Eixo " + (axis == 0 ? "NS" : "EW") 
+                            + ". Eixo transversal bloqueado em VERMELHO.");
+
+                    send(grantedMsg);
+                }
+            }
+
+            @Override
+            public void onEmergencyCleared(EmergencyRequest req) {
+                System.out.println("[TrafficLightAgent " + direction + "] Notificação de desimpedimento recebida para " 
+                        + req.vehicleId + " no Cruzamento C" + (intersectionIndex + 1));
+            }
+        });
+    }
+
+    /**
+     * Regista o semáforo nas Páginas Amarelas do JADE.
      */
     private void registarNoDF() {
         DFAgentDescription dfd = new DFAgentDescription();
@@ -113,187 +153,82 @@ public class TrafficLightAgent extends Agent {
         try {
             DFService.register(this, dfd);
         } catch (FIPAException fe) {
-            System.err.println("[TrafficLightAgent] Erro ao registar semáforo " + getLocalName() + " no DF: " + fe.getMessage());
+            System.err.println("[TrafficLightAgent] Erro ao registar no DF: " + fe.getMessage());
         }
     }
 
     /**
-     * Gere as fases do cruzamento com temporização adaptativa e preempção de socorro.
-     */
-    private void gerirCicloSemaforicoAdaptativo() {
-        TrafficEnvironment env = TrafficEnvironment.getInstance();
-        long now = System.currentTimeMillis();
-
-        // A. Se estiver ativo modo de preempção de socorro
-        if (emergencyOverride) {
-            if (now >= emergencyReleaseMillis) {
-                emergencyOverride = false;
-                System.out.println("[TrafficLightAgent C" + (intersectionIndex + 1) + "] Preempção de emergência concluída. A restaurar ciclo normal.");
-                transitarFase(Phase.ALL_RED_1);
-            }
-            return;
-        }
-
-        // B. Verificação contínua de sensores: aproximação de socorro (Feature 6)
-        if (env.hasEmergencyApproaching(intersectionIndex, 0)) {
-            ativarPreempcaoSocorro(0);
-            return;
-        } else if (env.hasEmergencyApproaching(intersectionIndex, 1)) {
-            ativarPreempcaoSocorro(1);
-            return;
-        }
-
-        // C. Máquina de Estados com Temporização Adaptativa (Feature 7)
-        long elapsed = now - phaseStartMillis;
-
-        switch (currentPhase) {
-            case NS_GREEN:
-                if (elapsed >= currentGreenDuration) {
-                    transitarFase(Phase.NS_YELLOW);
-                }
-                break;
-
-            case NS_YELLOW:
-                if (elapsed >= 1500) {
-                    transitarFase(Phase.ALL_RED_1);
-                }
-                break;
-
-            case ALL_RED_1:
-                if (elapsed >= 600) {
-                    // Calcula duração de verde para o eixo EW consoante a fila acumulada
-                    int queueEW = env.getWaitingVehiclesCount(intersectionIndex, 1);
-                    currentGreenDuration = calcularVerdeAdaptativo(queueEW);
-                    transitarFase(Phase.EW_GREEN);
-                }
-                break;
-
-            case EW_GREEN:
-                if (elapsed >= currentGreenDuration) {
-                    transitarFase(Phase.EW_YELLOW);
-                }
-                break;
-
-            case EW_YELLOW:
-                if (elapsed >= 1500) {
-                    transitarFase(Phase.ALL_RED_2);
-                }
-                break;
-
-            case ALL_RED_2:
-                if (elapsed >= 600) {
-                    // Calcula duração de verde para o eixo NS consoante a fila acumulada
-                    int queueNS = env.getWaitingVehiclesCount(intersectionIndex, 0);
-                    currentGreenDuration = calcularVerdeAdaptativo(queueNS);
-                    transitarFase(Phase.NS_GREEN);
-                }
-                break;
-        }
-    }
-
-    /**
-     * Calcula o tempo de verde ótimo em função do número de viaturas em fila (Feature 7).
-     *
-     * @param waitingVehicles Quantidade de veículos à espera na via
-     * @return Duração calculada do sinal verde em milissegundos
-     */
-    private long calcularVerdeAdaptativo(int waitingVehicles) {
-        long tempoBase = 3500;
-        long extensaoPorViatura = 800;
-        long tempoMaximo = 7500;
-
-        long verde = tempoBase + (waitingVehicles * extensaoPorViatura);
-        return Math.min(verde, tempoMaximo);
-    }
-
-    /**
-     * Transita de fase semafórica e atualiza os semáforos no ambiente gráfico.
-     */
-    private void transitarFase(Phase novaFase) {
-        this.currentPhase = novaFase;
-        this.phaseStartMillis = System.currentTimeMillis();
-        TrafficEnvironment env = TrafficEnvironment.getInstance();
-
-        switch (novaFase) {
-            case NS_GREEN:
-                env.setTrafficLight(intersectionIndex, 0, CitySimulationGUI.LightState.GREEN);
-                env.setTrafficLight(intersectionIndex, 1, CitySimulationGUI.LightState.RED);
-                break;
-            case NS_YELLOW:
-                env.setTrafficLight(intersectionIndex, 0, CitySimulationGUI.LightState.YELLOW);
-                env.setTrafficLight(intersectionIndex, 1, CitySimulationGUI.LightState.RED);
-                break;
-            case ALL_RED_1:
-            case ALL_RED_2:
-                env.setTrafficLight(intersectionIndex, 0, CitySimulationGUI.LightState.RED);
-                env.setTrafficLight(intersectionIndex, 1, CitySimulationGUI.LightState.RED);
-                break;
-            case EW_GREEN:
-                env.setTrafficLight(intersectionIndex, 0, CitySimulationGUI.LightState.RED);
-                env.setTrafficLight(intersectionIndex, 1, CitySimulationGUI.LightState.GREEN);
-                break;
-            case EW_YELLOW:
-                env.setTrafficLight(intersectionIndex, 0, CitySimulationGUI.LightState.RED);
-                env.setTrafficLight(intersectionIndex, 1, CitySimulationGUI.LightState.YELLOW);
-                break;
-        }
-    }
-
-    /**
-     * Ativa a preempção imediata para viaturas de socorro (Feature 6).
-     */
-    public void ativarPreempcaoSocorro(int axisEmergencia) {
-        this.emergencyOverride = true;
-        this.emergencyReleaseMillis = System.currentTimeMillis() + 5000; // 5 segundos de janela prioritária
-
-        TrafficEnvironment env = TrafficEnvironment.getInstance();
-        env.triggerEmergencyPreemption(intersectionIndex, axisEmergencia);
-
-        System.out.println("[TrafficLightAgent C" + (intersectionIndex + 1) 
-                + "] *** PREEMPÇÃO ATIVADA ***: Eixo " + (axisEmergencia == 0 ? "NS" : "EW") 
-                + " prioritário a VERDE para passagem de emergência!");
-    }
-
-    /**
-     * Processa mensagens formais FIPA-ACL recebidas de viaturas ou agentes de coordenação.
+     * Processa mensagens FIPA-ACL com distinção rigorosa de confirmações.
      */
     private void processarMensagemFIPA(ACLMessage msg) {
         String ontology = msg.getOntology();
 
-        // 1. Pedido de preempção prioritária de socorro (Feature 6)
+        // 1. Pedido de Preempção de Emergência (Feature 6)
         if ("emergency-preemption".equalsIgnoreCase(ontology)) {
+            String senderName = msg.getSender().getLocalName();
             System.out.println("[TrafficLightAgent " + direction + "] Mensagem de SOCORRO recebida de " 
-                    + msg.getSender().getLocalName() + ": " + msg.getContent());
+                    + senderName + ": " + msg.getContent());
 
-            ativarPreempcaoSocorro(axis);
+            // Submete o pedido à Autoridade Única do Cruzamento
+            EmergencyRequest req = authority.requestEmergency(senderName, axis, senderName);
 
-            ACLMessage reply = msg.createReply();
-            reply.setPerformative(ACLMessage.AGREE);
-            reply.setContent("CONFIRMACAO_PREEMPCAO: Corredor de socorro desimpedido a VERDE no Cruzamento C" + (intersectionIndex + 1));
-            send(reply);
+            // Confirmação 1: PEDIDO RECEBIDO (CONFIRM)
+            ACLMessage confirm = msg.createReply();
+            confirm.setPerformative(ACLMessage.CONFIRM);
+            confirm.setOntology("emergency-preemption");
+            confirm.setContent("RECEBIDO: Pedido de socorro de " + senderName + " registado na fila do Cruzamento C" + (intersectionIndex + 1));
+            send(confirm);
+
+            // Confirmação 2: PEDIDO ACEITE (AGREE)
+            ACLMessage agree = msg.createReply();
+            agree.setPerformative(ACLMessage.AGREE);
+            agree.setOntology("emergency-preemption");
+            agree.setContent("ACEITE: Pedido em processamento prioritario. Transicao segura em curso.");
+            send(agree);
+
+            // Se a autoridade já estiver na fase VERDE deste eixo, a confirmação 3 é emitida pelo callback
+            if (authority.getCurrentPhase().activeGreenAxis == axis) {
+                ACLMessage granted = msg.createReply();
+                granted.setPerformative(ACLMessage.INFORM);
+                granted.setOntology("emergency-preemption");
+                granted.setContent("VERDE_CONCEDIDO: Fase VERDE ja ativa no Eixo " + (axis == 0 ? "NS" : "EW") + ". Passagem autorizada.");
+                send(granted);
+            }
             return;
         }
 
-        // 2. Pedido de viatura regular com tempo de espera excessivo (Feature 3)
-        if ("traffic-management".equalsIgnoreCase(ontology)) {
-            System.out.println("[TrafficLightAgent " + direction + "] Pedido de passagem recebido de " 
-                    + msg.getSender().getLocalName() + " (Espera reportada). A priorizar comutação.");
+        // 2. Notificação de Desimpedimento do Cruzamento pela Viatura de Emergência
+        if ("emergency-cleared".equalsIgnoreCase(ontology)) {
+            String senderName = msg.getSender().getLocalName();
+            System.out.println("[TrafficLightAgent " + direction + "] Viatura " + senderName + " notificou desimpedimento do Cruzamento C" + (intersectionIndex + 1));
+            authority.notifyEmergencyCleared(senderName);
+            return;
+        }
 
-            // Reduz o tempo restante para acelerar a abertura do verde nesta via
-            if (currentGreenDuration > 2000) {
-                currentGreenDuration = Math.max(1500, currentGreenDuration - 1500);
+        // 3. Pedido de Viatura Regular com Espera Excessiva (Feature 3)
+        if ("traffic-management".equalsIgnoreCase(ontology)) {
+            System.out.println("[TrafficLightAgent " + direction + "] Pedido de passagem regular recebido de " 
+                    + msg.getSender().getLocalName());
+
+            // Se o eixo oposto estiver verde, acelera a sua comutação para amarelo
+            if (authority.getCurrentPhase().activeGreenAxis != axis && authority.getCurrentGreenDuration() > 2000) {
+                authority.setCurrentGreenDuration(Math.max(1500, authority.getCurrentGreenDuration() - 1500));
             }
 
             ACLMessage reply = msg.createReply();
             reply.setPerformative(ACLMessage.INFORM);
-            reply.setContent("PEDIDO_ACEITE: Semáforo " + direction + " antecipou a abertura de fase verde.");
+            reply.setOntology("traffic-management");
+            reply.setContent("PEDIDO_REGISTADO: Semáforo " + direction + " considerou o atraso na otimização de fase.");
             send(reply);
             return;
         }
 
-        // 3. Alertas de perturbação / condições climáticas de Machine Learning (Feature 5)
+        // 4. Alerta Preditivo de Perturbação / Meteorologia (Feature 5)
         if ("disruption-alert".equalsIgnoreCase(ontology)) {
-            System.out.println("[TrafficLightAgent " + direction + "] Alerta de perturbação acolhido: " + msg.getContent());
+            System.out.println("[TrafficLightAgent " + direction + "] Alerta de perturbação recebido: " + msg.getContent());
+            // Aumenta tempos de segurança (amarelo e all-red) durante condições adversas
+            authority.setYellowDuration(2000);
+            authority.setAllRedDuration(1500);
         }
     }
 
@@ -301,7 +236,7 @@ public class TrafficLightAgent extends Agent {
     protected void takeDown() {
         try {
             DFService.deregister(this);
-            System.out.println("[TrafficLightAgent] Semáforo " + direction + " desregistado do DF e encerrado com sucesso.");
+            System.out.println("[TrafficLightAgent] Semáforo " + direction + " desregistado do DF.");
         } catch (FIPAException fe) {
             fe.printStackTrace();
         }
