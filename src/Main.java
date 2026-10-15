@@ -32,7 +32,27 @@ public class Main {
         Profile p = new ProfileImpl();
         p.setParameter(Profile.GUI, "true"); // Ativa a consola gráfica de gestão de agentes RMA
 
-        AgentContainer container = rt.createMainContainer(p);
+        AgentContainer container = null;
+        try {
+            container = rt.createMainContainer(p);
+        } catch (Throwable t) {
+            System.err.println("[Main] Aviso: Porta padrão 1099 indisponível. A tentar porta alternativa 1199...");
+        }
+
+        // Se a porta 1099 estiver ocupada por outro processo, tenta a porta 1199
+        if (container == null) {
+            try {
+                Profile pAlt = new ProfileImpl();
+                pAlt.setParameter(Profile.MAIN_PORT, "1199");
+                pAlt.setParameter(Profile.GUI, "true");
+                container = rt.createMainContainer(pAlt);
+                System.out.println("[Main] Contentor JADE principal inicializado com sucesso na porta 1199.");
+            } catch (Throwable t2) {
+                System.err.println("[Main] ERRO FATAL: Não foi possível criar o contentor JADE principal.");
+                System.err.println("[Main] Certifique-se de que não existem instâncias anteriores a ocupar as portas 1099/1199.");
+                return;
+            }
+        }
 
         try {
             // 2. Inicializa o ambiente físico e interface de simulação urbana com 4 cruzamentos
