@@ -59,6 +59,14 @@ public class IntersectionSafetyAuthority {
         CONCLUIDO
     }
 
+    /** Modos de controlo experimental semafórico (Fase 5 - Etapa 2) */
+    public enum ControlMode {
+        FIXED_TIME,
+        LOCAL_ADAPTIVE,
+        MULTIAGENT_COORDINATED,
+        MULTIAGENT_ML
+    }
+
     /** Estrutura imutável de um pedido de emergência */
     public static class EmergencyRequest {
         public final String vehicleId;
@@ -116,11 +124,11 @@ public class IntersectionSafetyAuthority {
             this.plannedDurationMs = Math.max(2000, Math.min(10000, plannedDurationMs));
             this.offsetMs = Math.max(0, offsetMs);
             this.validUntilMs = validUntilMs;
-            this.issuedTimeMs = System.currentTimeMillis();
+            this.issuedTimeMs = SimulationClock.currentTimeMillis();
         }
 
         public boolean isExpired() {
-            return System.currentTimeMillis() > validUntilMs;
+            return SimulationClock.currentTimeMillis() > validUntilMs;
         }
 
         public boolean isApplied() {
@@ -185,6 +193,10 @@ public class IntersectionSafetyAuthority {
     private EmergencyRequest currentlyServingEmergency = null;
     private long emergencyMaxHoldUntil = 0;
 
+    // Modo de Controlo e temporização fixa (Fase 5 - Etapa 2)
+    private ControlMode controlMode = ControlMode.MULTIAGENT_COORDINATED;
+    private long fixedGreenDuration = 4000L;
+
     // Políticas de Coordenação Global (Fase 3)
     private CoordinationPolicy activePolicy = null;
     private final java.util.Set<String> processedCmdIds = new java.util.HashSet<>();
@@ -197,7 +209,7 @@ public class IntersectionSafetyAuthority {
      */
     public IntersectionSafetyAuthority(int intersectionIndex) {
         this.intersectionIndex = intersectionIndex;
-        this.phaseStartMillis = System.currentTimeMillis();
+        this.phaseStartMillis = SimulationClock.currentTimeMillis();
         // Inicializa com segurança (cruzamentos pares começam em NS_GREEN, ímpares em EW_GREEN)
         if (intersectionIndex % 2 == 0) {
             this.currentPhase = Phase.NS_GREEN;
@@ -289,6 +301,22 @@ public class IntersectionSafetyAuthority {
         return activePolicy;
     }
 
+    public synchronized ControlMode getControlMode() {
+        return controlMode;
+    }
+
+    public synchronized void setControlMode(ControlMode controlMode) {
+        this.controlMode = (controlMode != null) ? controlMode : ControlMode.LOCAL_ADAPTIVE;
+    }
+
+    public synchronized long getFixedGreenDuration() {
+        return fixedGreenDuration;
+    }
+
+    public synchronized void setFixedGreenDuration(long fixedGreenDuration) {
+        this.fixedGreenDuration = Math.max(2000L, Math.min(10000L, fixedGreenDuration));
+    }
+
     /* =========================================================================
      * GESTÃO DE COORDENAÇÃO GLOBAL E ONDAS VERDES (Fase 3)
      * ========================================================================= */
@@ -297,16 +325,19 @@ public class IntersectionSafetyAuthority {
      * Avalia e regista uma política de coordenação emitida pelo Agente Coordenador Central.
      *
      * Validações de segurança:
+     * - Rejeição em Modo FIXED_TIME ou LOCAL_ADAPTIVE (isolamento experimental).
      * - Rejeição de comandos expirados (timeout).
      * - Idempotência / Anti-replay: rejeita comandos com cmdId já processado.
      * - Precedência de emergência: se existir socorro ativo no eixo incompatível, rejeita com REFUSE.
      * - Respeito por tempos mínimos e máximos legais de verde (2000ms a 10000ms).
      *
      * @param policy Política macro a avaliar
-     * @return Código de resultado ("ACCEPTED", "EXPIRED", "DUPLICATE_COMMAND", "REJECTED_EMERGENCY_PRIORITY", "INVALID_AXIS")
+     * @return Código de resultado ("ACCEPTED", "EXPIRED", "DUPLICATE_COMMAND", "REJECTED_EMERGENCY_PRIORITY", "INVALID_AXIS", "REJECTED_FIXED_TIME_MODE", "REJECTED_LOCAL_ADAPTIVE_MODE")
      */
     public synchronized String evaluateAndRegisterCoordinationPolicy(CoordinationPolicy policy) {
         if (policy == null) return "INVALID_PAYLOAD";
+        if (controlMode == ControlMode.FIXED_TIME) return "REJECTED_FIXED_TIME_MODE";
+        if (controlMode == ControlMode.LOCAL_ADAPTIVE) return "REJECTED_LOCAL_ADAPTIVE_MODE";
         if (policy.isExpired()) return "EXPIRED";
         if (policy.targetAxis != 0 && policy.targetAxis != 1) return "INVALID_AXIS";
 
@@ -372,7 +403,7 @@ public class IntersectionSafetyAuthority {
         assertSafetyInvariant(newPhase.nsState, newPhase.ewState);
 
         this.currentPhase = newPhase;
-        this.phaseStartMillis = System.currentTimeMillis();
+        this.phaseStartMillis = SimulationClock.currentTimeMillis();
 
         // Notifica o ambiente / interface gráfica
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
@@ -410,7 +441,7 @@ public class IntersectionSafetyAuthority {
      * @return O pedido registado ou existente
      */
     public synchronized EmergencyRequest requestEmergency(String vehicleId, int axis, String senderAID) {
-        long now = System.currentTimeMillis();
+        long now = SimulationClock.currentTimeMillis();
 
         // 1. Idempotência / Anti-debouncing: se o mesmo veículo já tem pedido pendente ou ativo
         EmergencyRequest existing = activeRequestsByVehicle.get(vehicleId);
@@ -490,7 +521,7 @@ public class IntersectionSafetyAuthority {
             // mantém o verde atual durante um período residual seguro
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Fila de socorro vazia. A restaurar controlo adaptativo com segurança.");
-            this.phaseStartMillis = System.currentTimeMillis();
+            this.phaseStartMillis = SimulationClock.currentTimeMillis();
         }
     }
 
@@ -500,7 +531,7 @@ public class IntersectionSafetyAuthority {
     private synchronized void avaliaEFazProgressoEmergencia() {
         if (currentlyServingEmergency == null && !emergencyQueue.isEmpty()) {
             currentlyServingEmergency = emergencyQueue.poll();
-            emergencyMaxHoldUntil = System.currentTimeMillis() + 8000; // Timeout de segurança máxima (8s)
+            emergencyMaxHoldUntil = SimulationClock.currentTimeMillis() + 8000; // Timeout de segurança máxima (8s)
         }
 
         if (currentlyServingEmergency == null) return;
@@ -514,7 +545,7 @@ public class IntersectionSafetyAuthority {
                 fireGreenGranted(currentlyServingEmergency);
             }
             // Estende o verde para garantir passagem contínua da viatura
-            this.phaseStartMillis = System.currentTimeMillis();
+            this.phaseStartMillis = SimulationClock.currentTimeMillis();
             return;
         }
 
@@ -541,7 +572,7 @@ public class IntersectionSafetyAuthority {
      * @param waitingVehiclesEW Número de carros parados em EW (para adaptação)
      */
     public synchronized void updateTick(int waitingVehiclesNS, int waitingVehiclesEW) {
-        long now = System.currentTimeMillis();
+        long now = SimulationClock.currentTimeMillis();
         long elapsed = now - phaseStartMillis;
 
         // 1. Tratamento de timeout de segurança para emergência em curso
@@ -595,12 +626,14 @@ public class IntersectionSafetyAuthority {
                             }
                         }
                     } else {
-                        // Ciclo adaptativo normal ou coordenado (Fase 3)
+                        // Ciclo adaptativo normal ou coordenado (Fase 3 / Fase 5)
                         Phase next = (targetNextPhase != null) ? targetNextPhase : Phase.EW_GREEN;
                         targetNextPhase = null;
 
                         if (next == Phase.EW_GREEN) {
-                            if (activePolicy != null && !activePolicy.isExpired() && activePolicy.targetAxis == 1) {
+                            if (controlMode == ControlMode.FIXED_TIME) {
+                                this.currentGreenDuration = fixedGreenDuration;
+                            } else if (activePolicy != null && !activePolicy.isExpired() && activePolicy.targetAxis == 1) {
                                 this.currentGreenDuration = activePolicy.plannedDurationMs;
                                 activePolicy.setApplied(true);
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
@@ -614,7 +647,9 @@ public class IntersectionSafetyAuthority {
                             }
                             applyPhaseAtomic(Phase.EW_GREEN);
                         } else {
-                            if (activePolicy != null && !activePolicy.isExpired() && activePolicy.targetAxis == 0) {
+                            if (controlMode == ControlMode.FIXED_TIME) {
+                                this.currentGreenDuration = fixedGreenDuration;
+                            } else if (activePolicy != null && !activePolicy.isExpired() && activePolicy.targetAxis == 0) {
                                 this.currentGreenDuration = activePolicy.plannedDurationMs;
                                 activePolicy.setApplied(true);
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 

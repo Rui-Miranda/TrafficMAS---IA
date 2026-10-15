@@ -226,8 +226,14 @@ public class TrafficDatasetGenerator {
         System.out.printf(Locale.US, "      • Classe 1 (Congestionado): %d (%.1f%%)\n", positiveCount, positivePct);
 
         try {
-            saveToCsv(records, DATASET_CSV_PATH);
-            System.out.println("\n[SUCESSO] Ficheiro CSV gerado e salvo em: " + DATASET_CSV_PATH);
+            File existing = new File(DATASET_CSV_PATH);
+            if (!existing.exists()) {
+                saveToCsv(records, DATASET_CSV_PATH);
+                System.out.println("\n[SUCESSO] Ficheiro CSV gerado e salvo em: " + DATASET_CSV_PATH);
+            } else {
+                saveToCsv(records, "data/traffic_disruption_dataset_validation.csv");
+                System.out.println("\n[SUCESSO] Ficheiro CSV gerado e salvo em: data/traffic_disruption_dataset_validation.csv (preservando dataset congelado)");
+            }
         } catch (IOException e) {
             System.err.println("[ERRO] Falha ao salvar CSV: " + e.getMessage());
             System.exit(1);

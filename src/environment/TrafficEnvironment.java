@@ -18,6 +18,31 @@ public class TrafficEnvironment {
 
     private static TrafficEnvironment instance;
 
+    /** Interface provedora de dados sensoriais (Fase 5 - Etapa 2) */
+    public interface EnvironmentDataProvider {
+        int getApproachingCount(int intersectionIndex, int axis);
+        int getWaitingCount(int intersectionIndex, int axis);
+        boolean hasEmergencyApproaching(int intersectionIndex, int axis);
+        double getVehicleWaitSeconds(String vehicleId);
+        double getAverageSpeed(int intersectionIndex);
+        double getAverageWaitingTime(int intersectionIndex);
+        int getWeatherCondition();
+        int getIncidentPresent();
+        int getRoadCapacity();
+        double getGlobalSpeedMultiplier();
+        String getDisruptionNotice();
+    }
+
+    private static volatile EnvironmentDataProvider customDataProvider = null;
+
+    public static void setCustomDataProvider(EnvironmentDataProvider provider) {
+        customDataProvider = provider;
+    }
+
+    public static EnvironmentDataProvider getCustomDataProvider() {
+        return customDataProvider;
+    }
+
     // Filas legadas mantidas para compatibilidade retroativa
     private final ConcurrentLinkedQueue<String> queueNS = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<String> queueEW = new ConcurrentLinkedQueue<>();
@@ -56,6 +81,9 @@ public class TrafficEnvironment {
      * @return Quantidade de veículos detetados no raio sensorial
      */
     public int getApproachingVehiclesCount(int intersectionIndex, int axis) {
+        if (customDataProvider != null) {
+            return customDataProvider.getApproachingCount(intersectionIndex, axis);
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getApproachingCount(intersectionIndex, axis) : 0;
     }
@@ -68,6 +96,9 @@ public class TrafficEnvironment {
      * @return Quantidade de veículos com velocidade residual (< 0.2 px/tick)
      */
     public int getWaitingVehiclesCount(int intersectionIndex, int axis) {
+        if (customDataProvider != null) {
+            return customDataProvider.getWaitingCount(intersectionIndex, axis);
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getWaitingCount(intersectionIndex, axis) : 0;
     }
@@ -81,6 +112,9 @@ public class TrafficEnvironment {
      * @return {@code true} se existir viatura de emergência a requerer passagem prioritária
      */
     public boolean hasEmergencyApproaching(int intersectionIndex, int axis) {
+        if (customDataProvider != null) {
+            return customDataProvider.hasEmergencyApproaching(intersectionIndex, axis);
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) && gui.hasEmergencyApproaching(intersectionIndex, axis);
     }
@@ -92,6 +126,9 @@ public class TrafficEnvironment {
      * @return Duração da imobilização atual em segundos
      */
     public double getVehicleWaitSeconds(String vehicleId) {
+        if (customDataProvider != null) {
+            return customDataProvider.getVehicleWaitSeconds(vehicleId);
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getVehicleWaitSeconds(vehicleId) : 0.0;
     }
@@ -162,6 +199,9 @@ public class TrafficEnvironment {
      * Obtém o multiplicador de atrito/velocidade imposto pelo ambiente físico real (ex: chuva, obras).
      */
     public double getEnvironmentalSpeedMultiplier() {
+        if (customDataProvider != null) {
+            return customDataProvider.getGlobalSpeedMultiplier();
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getGlobalSpeedMultiplier() : 1.0;
     }
@@ -170,6 +210,9 @@ public class TrafficEnvironment {
      * Obtém a velocidade média real medida das viaturas em aproximação a um cruzamento (px/tick).
      */
     public double getAverageSpeed(int intersectionIndex) {
+        if (customDataProvider != null) {
+            return customDataProvider.getAverageSpeed(intersectionIndex);
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getAverageSpeed(intersectionIndex) : 2.4;
     }
@@ -178,6 +221,9 @@ public class TrafficEnvironment {
      * Obtém o tempo médio real de espera das viaturas imobilizadas na fila de um cruzamento (segundos).
      */
     public double getAverageWaitingTime(int intersectionIndex) {
+        if (customDataProvider != null) {
+            return customDataProvider.getAverageWaitingTime(intersectionIndex);
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getAverageWaitingTime(intersectionIndex) : 0.0;
     }
@@ -186,6 +232,9 @@ public class TrafficEnvironment {
      * Obtém a condição climática física atual (0=SECO, 1=CHUVA, 2=NEVOEIRO).
      */
     public int getWeatherCondition() {
+        if (customDataProvider != null) {
+            return customDataProvider.getWeatherCondition();
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getWeatherCondition() : 0;
     }
@@ -194,6 +243,9 @@ public class TrafficEnvironment {
      * Obtém a presença física de incidente ou obras (0=NÃO, 1=SIM).
      */
     public int getIncidentPresent() {
+        if (customDataProvider != null) {
+            return customDataProvider.getIncidentPresent();
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getIncidentPresent() : 0;
     }
@@ -202,6 +254,9 @@ public class TrafficEnvironment {
      * Obtém a capacidade física da via (4 faixas normais, 2 faixas com supressão de obras).
      */
     public int getRoadCapacity() {
+        if (customDataProvider != null) {
+            return customDataProvider.getRoadCapacity();
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getRoadCapacity() : 4;
     }
@@ -212,6 +267,9 @@ public class TrafficEnvironment {
      * @return Texto informativo da perturbação
      */
     public String getDisruptionNotice() {
+        if (customDataProvider != null) {
+            return customDataProvider.getDisruptionNotice();
+        }
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getDisruptionNotice() : "Condições Normais";
     }

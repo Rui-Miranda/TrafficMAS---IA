@@ -97,8 +97,15 @@ public class DisruptionManagementAgent extends Agent {
     /** Caminho do modelo (pode ser substituído em testes) */
     private String modelPath = ModelPersistenceManager.DEFAULT_MODEL_PATH;
 
+    private static volatile DisruptionManagementAgent activeInstance = null;
+
+    public static DisruptionManagementAgent getActiveInstance() {
+        return activeInstance;
+    }
+
     @Override
     protected void setup() {
+        activeInstance = this;
         // 0. Parâmetros opcionais do agente (usado em testes para apontar para ficheiro alternativo)
         Object[] args = getArguments();
         if (args != null && args.length > 0 && args[0] instanceof String) {
@@ -231,7 +238,7 @@ public class DisruptionManagementAgent extends Agent {
 
         // Emite alerta DISTURBANCE_ALERT se a probabilidade ultrapassa o threshold e o cooldown foi respeitado
         if (maxPredClass == 1) {
-            long now = System.currentTimeMillis();
+            long now = environment.SimulationClock.currentTimeMillis();
             if ((now - lastAlertTimestamp) >= ALERT_COOLDOWN_MS) {
                 emitirDisturbanceAlert(maxProbIntersection, maxProbability, environmentalSpeedMultiplier);
                 lastAlertTimestamp = now;
@@ -337,9 +344,10 @@ public class DisruptionManagementAgent extends Agent {
     private void emitirDisturbanceAlert(int intersectionIndex, double probability, double speedMultiplier) {
         ACLMessage msg = new ACLMessage(ACLMessage.INFORM);
         msg.setOntology("DISTURBANCE_ALERT");
-        msg.setConversationId("ml-alert-" + System.currentTimeMillis());
 
-        long now = System.currentTimeMillis();
+        long now = environment.SimulationClock.currentTimeMillis();
+        msg.setConversationId("ml-alert-" + now);
+
         long validUntil = now + (long) (modelBundle.getPredictionHorizonSeconds() * 1000);
         String alertId = "ALERT_ML_C" + (intersectionIndex + 1) + "_" + now;
         String riskType = (probability >= 0.70) ? "CRITICAL_CONGESTION" : "MODERATE_CONGESTION";
@@ -509,8 +517,22 @@ public class DisruptionManagementAgent extends Agent {
         this.lastAlertTimestamp = timestamp;
     }
 
+    /**
+     * Dispara um ciclo determinístico de inferência ML sincronizado com o relógio simulado (Fase 5 - Etapa 2).
+     */
+    public synchronized void triggerScheduledInference() {
+        if (mlModelLoaded) {
+            executarInferenciaMLOperacional();
+        } else {
+            executarInferenciaLegada();
+        }
+    }
+
     @Override
     protected void takeDown() {
+        if (activeInstance == this) {
+            activeInstance = null;
+        }
         try {
             DFService.deregister(this);
             System.out.println("[DisruptionManagementAgent] Desregistado do DF e encerrado.");

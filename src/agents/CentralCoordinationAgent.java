@@ -79,7 +79,7 @@ public class CentralCoordinationAgent extends Agent {
             this.targetAxis = targetAxis;
             this.plannedDurationMs = plannedDurationMs;
             this.offsetMs = offsetMs;
-            this.issuedTimestamp = System.currentTimeMillis();
+            this.issuedTimestamp = environment.SimulationClock.currentTimeMillis();
             this.status = "SENT";
             this.wasApplied = false;
         }
@@ -185,7 +185,7 @@ public class CentralCoordinationAgent extends Agent {
             tel.waitingNS = waitingNS;
             tel.waitingEW = waitingEW;
             tel.hasEmergency = hasEmerg;
-            tel.lastUpdatedMs = System.currentTimeMillis();
+            tel.lastUpdatedMs = environment.SimulationClock.currentTimeMillis();
         }
 
         // 1. Deteção de Congestionamento em Corredores (Onda Verde)
@@ -295,7 +295,7 @@ public class CentralCoordinationAgent extends Agent {
         request.setOntology("coordination-policy");
         request.setConversationId("coord-req-" + cmdId);
 
-        long validUntil = System.currentTimeMillis() + 10000; // Validade de 10 segundos
+        long validUntil = environment.SimulationClock.currentTimeMillis() + 10000; // Validade de 10 segundos
         request.setContent("POLICY;cmdId=" + cmdId 
                 + ";policyType=" + policyType 
                 + ";targetAxis=" + targetAxis 
@@ -376,7 +376,7 @@ public class CentralCoordinationAgent extends Agent {
                 tel.currentPhase = params.getOrDefault("phase", "NS_GREEN");
                 tel.currentGreenDuration = Long.parseLong(params.getOrDefault("greenDuration", "4000"));
                 tel.hasEmergency = Boolean.parseBoolean(params.getOrDefault("emergency", "false"));
-                tel.lastUpdatedMs = System.currentTimeMillis();
+                tel.lastUpdatedMs = environment.SimulationClock.currentTimeMillis();
             }
         } catch (Exception e) {
             System.err.println("[CentralCoordinationAgent] Erro no parsing de status: " + e.getMessage());
@@ -415,7 +415,7 @@ public class CentralCoordinationAgent extends Agent {
             if (record != null) {
                 record.status = "APPLIED";
                 record.wasApplied = true;
-                record.appliedTimestamp = System.currentTimeMillis();
+                record.appliedTimestamp = environment.SimulationClock.currentTimeMillis();
                 lastAdherenceByIntersection.put(record.intersectionIndex, record.appliedTimestamp);
                 System.out.println("[CentralCoordinationAgent] >>> SUCESSO: Diretiva " + cmdId 
                         + " EFETIVAMENTE APLICADA no Cruzamento C" + (record.intersectionIndex + 1) + "!");
@@ -493,7 +493,7 @@ public class CentralCoordinationAgent extends Agent {
 
             // 3. Validação de Expiração
             long validUntil = Long.parseLong(params.getOrDefault("validUntil", "0"));
-            long now = System.currentTimeMillis();
+            long now = environment.SimulationClock.currentTimeMillis();
             if (validUntil > 0 && validUntil < now) {
                 System.err.println("[CentralCoordinationAgent] Alerta ML rejeitado: alerta expirado (validUntil=" + validUntil + " < now=" + now + ")");
                 ACLMessage refReply = msg.createReply();
@@ -647,8 +647,18 @@ public class CentralCoordinationAgent extends Agent {
         return (cmdId != null) ? commandRecords.get(cmdId) : null;
     }
 
+    /**
+     * Dispara um ciclo determinístico de coordenação macro sincronizado com o relógio simulado (Fase 5 - Etapa 2).
+     */
+    public synchronized void triggerScheduledCoordination() {
+        auditarRedeETomarDecisoes();
+    }
+
     @Override
     protected void takeDown() {
+        if (activeInstance == this) {
+            activeInstance = null;
+        }
         try {
             DFService.deregister(this);
             System.out.println("[CentralCoordinationAgent] Desregistado do DF e encerrado.");

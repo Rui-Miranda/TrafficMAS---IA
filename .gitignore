@@ -9,3 +9,6 @@ MTPs-Main-Container.txt
 # Ficheiros de índice locais do editor
 .vscode/.project
 .vscode/.classpath
+
+# Ficheiros temporários de validação de testes
+*validation.csv
