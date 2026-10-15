@@ -63,26 +63,33 @@ TrafficMAS---IA/
 │   ├── jade.jar                     # Runtime da plataforma JADE 4.5
 │   └── commons-codec-1.3.jar        # Codificação e utilitários FIPA
 ├── src/
-│   ├── Main.java                    # Ponto de entrada e arranque do JADE
+│   ├── Main.java                    # Ponto de entrada e arranque do ecossistema JADE
 │   ├── agents/
-│   │   ├── TrafficLightAgent.java          # Agente semáforo inteligente adaptativo
-│   │   ├── VehicleAgent.java               # Agente viatura convencional
-│   │   ├── EmergencyVehicleAgent.java      # Agente viatura de socorro prioritária
-│   │   ├── DisruptionManagementAgent.java  # Agente de previsão e alertas via ML
-│   │   └── CentralCoordinationAgent.java   # Agente de supervisão central de rede
-│   └── environment/
-│       ├── TrafficEnvironment.java         # Fachada oficial de sensores e atuadores
-│       └── CitySimulationGUI.java          # Interface gráfica e cinemática urbana
+│   │   ├── TrafficLightAgent.java          # Semáforos adaptativos com telemetria FIPA
+│   │   ├── VehicleAgent.java               # Viaturas regulares com deteção dinâmica de cruzamento
+│   │   ├── EmergencyVehicleAgent.java      # Viaturas prioritárias com preempção de socorro
+│   │   ├── DisruptionManagementAgent.java  # Agente preditivo de perturbações e atrito viário
+│   │   └── CentralCoordinationAgent.java   # Coordenador Central (Onda Verde e Equilíbrio FIPA)
+│   ├── environment/
+│   │   ├── IntersectionSafetyAuthority.java # Autoridade única de segurança e controlo atómico de fase
+│   │   ├── TrafficEnvironment.java         # Fachada oficial de sensores/atuadores (compatível com headless)
+│   │   └── CitySimulationGUI.java          # Interface visual com cinemática contínua de 4 cruzamentos
+│   └── test/
+│       ├── SafetyTestSuite.java            # Suite Fase 1: Segurança de fases e emergências (7 testes)
+│       ├── VehicleTestSuite.java           # Suite Fase 2: Deteção de cruzamentos e DF dos veículos (7 testes)
+│       └── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
 ├── bin/                             # Binários compilados (.class)
-├── run.bat                          # Script de execução rápida para Windows
-├── run.ps1                          # Script PowerShell para execução
-├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo
-└── README.md                        # Este documento
+├── run.bat                          # Execução rápida da simulação (Windows)
+├── run.ps1                          # Execução rápida da simulação (PowerShell)
+├── run_tests.bat                    # Execução das 3 suites de testes automatizados (Batch)
+├── run_tests.ps1                    # Execução das 3 suites de testes automatizados (PowerShell)
+├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo IEEE
+└── README.md                        # Documentação principal
 ```
 
 ---
 
-## 4. Instruções de Compilação e Execução
+## 4. Instruções de Execução da Simulação
 
 ### Opção A: Execução Imediata (Recomendada no Windows)
 Faça duplo clique no ficheiro `run.bat` ou execute no terminal:
@@ -106,7 +113,32 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
 
 ---
 
-## 5. Calendário Operacional e Entregas
+## 5. Execução dos Testes Automatizados (Fases 1, 2 e 3)
+
+O projeto dispõe de **25 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários e o protocolo completo de coordenação e onda verde.
+
+### Executar Todas as Suites de Testes (Recomendado):
+```powershell
+.\run_tests.ps1
+# ou em linha de comandos Windows:
+.\run_tests.bat
+```
+
+### Suites Individuais:
+```powershell
+# Fase 1: Segurança e Invariante de Fases (7 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SafetyTestSuite
+
+# Fase 2: Agentes de Veículos e Deteção Espacial (7 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.VehicleTestSuite
+
+# Fase 3: Coordenação Multiagente e Onda Verde (11 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.CoordinationTestSuite
+```
+
+---
+
+## 6. Calendário Operacional e Entregas
 
 * **Entrega Intermédia (30%):** **1 de Novembro** (Apresentação e Demonstração Laboratorial Obrigatória: **2 a 4 de Novembro**).
 * **Entrega Final (70%):** **3 de Janeiro** (Demonstração: 20%, Código-Fonte: 25%, Artigo Científico SCImago Q1/Q2/Q3: 25%).
