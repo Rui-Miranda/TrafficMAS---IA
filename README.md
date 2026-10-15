@@ -59,6 +59,8 @@ O sistema substitui os controladores semafóricos tradicionais de temporização
 
 ```
 TrafficMAS---IA/
+├── data/
+│   └── traffic_disruption_dataset.csv  # Dataset de ML gerado da simulação (3.072 instâncias)
 ├── lib/
 │   ├── jade.jar                     # Runtime da plataforma JADE 4.5
 │   └── commons-codec-1.3.jar        # Codificação e utilitários FIPA
@@ -71,18 +73,23 @@ TrafficMAS---IA/
 │   │   ├── DisruptionManagementAgent.java  # Agente preditivo de perturbações e atrito viário
 │   │   └── CentralCoordinationAgent.java   # Coordenador Central (Onda Verde e Equilíbrio FIPA)
 │   ├── environment/
+│   │   ├── HeadlessTrafficSimulator.java   # Simulador headless rápido para geração determinística de dados
 │   │   ├── IntersectionSafetyAuthority.java # Autoridade única de segurança e controlo atómico de fase
 │   │   ├── TrafficEnvironment.java         # Fachada oficial de sensores/atuadores (compatível com headless)
 │   │   └── CitySimulationGUI.java          # Interface visual com cinemática contínua de 4 cruzamentos
+│   ├── ml/
+│   │   ├── TrafficDatasetGenerator.java    # Orquestrador de 16 corridas com horizonte t + 60s
+│   │   └── DatasetValidator.java           # Validador de integridade, leakage e splits
 │   └── test/
 │       ├── SafetyTestSuite.java            # Suite Fase 1: Segurança de fases e emergências (7 testes)
 │       ├── VehicleTestSuite.java           # Suite Fase 2: Deteção de cruzamentos e DF dos veículos (7 testes)
-│       └── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
+│       ├── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
+│       └── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (8 testes)
 ├── bin/                             # Binários compilados (.class)
 ├── run.bat                          # Execução rápida da simulação (Windows)
 ├── run.ps1                          # Execução rápida da simulação (PowerShell)
-├── run_tests.bat                    # Execução das 3 suites de testes automatizados (Batch)
-├── run_tests.ps1                    # Execução das 3 suites de testes automatizados (PowerShell)
+├── run_tests.bat                    # Execução das 4 suites de testes automatizados (Batch)
+├── run_tests.ps1                    # Execução das 4 suites de testes automatizados (PowerShell)
 ├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo IEEE
 └── README.md                        # Documentação principal
 ```
@@ -105,7 +112,7 @@ Faça duplo clique no ficheiro `run.bat` ou execute no terminal:
 ### Opção C: Compilação Manual via Linha de Comandos
 ```powershell
 # 1. Compilar todas as classes do projeto
-javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java
+javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/test/*.java
 
 # 2. Executar a plataforma multiagente
 java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
@@ -113,9 +120,9 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
 
 ---
 
-## 5. Execução dos Testes Automatizados (Fases 1, 2 e 3)
+## 5. Execução dos Testes Automatizados (Fases 1, 2, 3 e 4)
 
-O projeto dispõe de **25 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários e o protocolo completo de coordenação e onda verde.
+O projeto dispõe de **33 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, e a validação estrita do dataset de Machine Learning.
 
 ### Executar Todas as Suites de Testes (Recomendado):
 ```powershell
@@ -134,11 +141,25 @@ java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar"
 
 # Fase 3: Coordenação Multiagente e Onda Verde (11 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.CoordinationTestSuite
+
+# Fase 4 (Etapa 1): Validação do Dataset de ML (8 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.DatasetValidationTest
 ```
 
 ---
 
-## 6. Calendário Operacional e Entregas
+## 6. Geração do Dataset de Machine Learning (Fase 4 — Etapa 1)
+
+Para regerar o dataset de 3.072 observações com horizonte de 60 segundos ($t + 60\text{s}$) através da simulação determinística:
+```powershell
+java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" ml.TrafficDatasetGenerator
+```
+
+O ficheiro CSV resultante é salvo em `data/traffic_disruption_dataset.csv`.
+
+---
+
+## 7. Calendário Operacional e Entregas
 
 * **Entrega Intermédia (30%):** **1 de Novembro** (Apresentação e Demonstração Laboratorial Obrigatória: **2 a 4 de Novembro**).
 * **Entrega Final (70%):** **3 de Janeiro** (Demonstração: 20%, Código-Fonte: 25%, Artigo Científico SCImago Q1/Q2/Q3: 25%).
