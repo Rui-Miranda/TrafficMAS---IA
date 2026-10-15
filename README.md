@@ -83,9 +83,13 @@ TrafficMAS---IA/
 │   │   ├── LogisticRegression.java         # Modelo A: Regressão Logística L2 + Gradient Descent
 │   │   ├── DecisionTreeClassifier.java     # Modelo B: Árvore de Decisão CART com impureza de Gini
 │   │   ├── MajorityClassBaseline.java      # Classificador baseline de classe maioritária
+│   │   ├── PersistenceBaseline.java        # Baseline de persistência temporal (status quo em t)
 │   │   ├── ModelEvaluator.java             # Avaliador estatístico (Accuracy, Precision, Recall, F1, Matriz de Confusão)
 │   │   ├── DatasetLoader.java              # Carregador e particionador sem leakage
 │   │   ├── ModelComparisonExperiment.java  # Comparador empírico em TRAIN e VAL
+│   │   ├── TrafficModelBundle.java         # Bundle serializável com modelo, scaler, metadados e threshold
+│   │   ├── ModelPersistenceManager.java    # Gestor de gravação e carregamento de modelos binários
+│   │   ├── FinalModelEvaluator.java        # Avaliador final cego no conjunto TEST e análise de antecipação
 │   │   ├── TrafficDatasetGenerator.java    # Orquestrador de 16 corridas com horizonte t + 60s
 │   │   └── DatasetValidator.java           # Validador de integridade, leakage e splits
 │   └── test/
@@ -93,12 +97,13 @@ TrafficMAS---IA/
 │       ├── VehicleTestSuite.java           # Suite Fase 2: Deteção de cruzamentos e DF dos veículos (7 testes)
 │       ├── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
 │       ├── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (8 testes)
-│       └── MachineLearningModelTest.java   # Suite Fase 4 (Etapa 2): Validação dos modelos de ML (14 testes)
+│       ├── MachineLearningModelTest.java   # Suite Fase 4 (Etapa 2): Validação dos modelos de ML (14 testes)
+│       └── ModelSelectionAndPersistenceTest.java # Suite Fase 4 (Etapa 3): Seleção e persistência (12 testes)
 ├── bin/                             # Binários compilados (.class)
 ├── run.bat                          # Execução rápida da simulação (Windows)
 ├── run.ps1                          # Execução rápida da simulação (PowerShell)
-├── run_tests.bat                    # Execução das 5 suites de testes automatizados (Batch)
-├── run_tests.ps1                    # Execução das 5 suites de testes automatizados (PowerShell)
+├── run_tests.bat                    # Execução das 6 suites de testes automatizados (Batch)
+├── run_tests.ps1                    # Execução das 6 suites de testes automatizados (PowerShell)
 ├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo IEEE
 └── README.md                        # Documentação principal
 ```
@@ -131,7 +136,7 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
 
 ## 5. Execução dos Testes Automatizados (Fases 1, 2, 3 e 4)
 
-O projeto dispõe de **47 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML e a conformidade matemática dos modelos de aprendizagem supervisionada.
+O projeto dispõe de **59 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML, a conformidade matemática dos modelos e a persistência/desserialização em disco.
 
 ### Executar Todas as Suites de Testes (Recomendado):
 ```powershell
@@ -156,6 +161,9 @@ java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar"
 
 # Fase 4 (Etapa 2): Modelos de ML e Métricas Estatísticas (14 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MachineLearningModelTest
+
+# Fase 4 (Etapa 3): Seleção Final e Persistência do Modelo (12 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.ModelSelectionAndPersistenceTest
 ```
 
 ---
@@ -180,7 +188,16 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" ml.ModelComparisonExperime
 
 ---
 
-## 8. Calendário Operacional e Entregas
+## 8. Avaliação Cega em TEST e Persistência do Modelo (Fase 4 — Etapa 3)
+
+Para treinar o modelo definitivo, serializar o bundle em `data/traffic_model.bin` e realizar a avaliação cega em `TEST` (com comparação de antecipação face ao Baseline de Persistência):
+```powershell
+java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" ml.FinalModelEvaluator
+```
+
+---
+
+## 9. Calendário Operacional e Entregas
 
 * **Entrega Intermédia (30%):** **1 de Novembro** (Apresentação e Demonstração Laboratorial Obrigatória: **2 a 4 de Novembro**).
 * **Entrega Final (70%):** **3 de Janeiro** (Demonstração: 20%, Código-Fonte: 25%, Artigo Científico SCImago Q1/Q2/Q3: 25%).
