@@ -26,8 +26,10 @@ public class TrafficEnvironment {
      * Construtor privado (Padrão Singleton).
      */
     private TrafficEnvironment() {
-        // Assegura a instanciação e arranque da interface visual
-        CitySimulationGUI.getInstance();
+        // Assegura a instanciação e arranque da interface visual apenas se não for headless
+        if (!java.awt.GraphicsEnvironment.isHeadless()) {
+            CitySimulationGUI.getInstance();
+        }
     }
 
     /**
@@ -54,7 +56,8 @@ public class TrafficEnvironment {
      * @return Quantidade de veículos detetados no raio sensorial
      */
     public int getApproachingVehiclesCount(int intersectionIndex, int axis) {
-        return CitySimulationGUI.getInstance().getApproachingCount(intersectionIndex, axis);
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getApproachingCount(intersectionIndex, axis) : 0;
     }
 
     /**
@@ -65,7 +68,8 @@ public class TrafficEnvironment {
      * @return Quantidade de veículos com velocidade residual (< 0.2 px/tick)
      */
     public int getWaitingVehiclesCount(int intersectionIndex, int axis) {
-        return CitySimulationGUI.getInstance().getWaitingCount(intersectionIndex, axis);
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getWaitingCount(intersectionIndex, axis) : 0;
     }
 
     /**
@@ -77,7 +81,8 @@ public class TrafficEnvironment {
      * @return {@code true} se existir viatura de emergência a requerer passagem prioritária
      */
     public boolean hasEmergencyApproaching(int intersectionIndex, int axis) {
-        return CitySimulationGUI.getInstance().hasEmergencyApproaching(intersectionIndex, axis);
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) && gui.hasEmergencyApproaching(intersectionIndex, axis);
     }
 
     /**
@@ -87,7 +92,8 @@ public class TrafficEnvironment {
      * @return Duração da imobilização atual em segundos
      */
     public double getVehicleWaitSeconds(String vehicleId) {
-        return CitySimulationGUI.getInstance().getVehicleWaitSeconds(vehicleId);
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getVehicleWaitSeconds(vehicleId) : 0.0;
     }
 
     /* =========================================================================
@@ -102,7 +108,10 @@ public class TrafficEnvironment {
      * @param state Novo estado luminoso (GREEN, YELLOW, RED)
      */
     public void setTrafficLight(int intersectionIndex, int axis, CitySimulationGUI.LightState state) {
-        CitySimulationGUI.getInstance().setTrafficLight(intersectionIndex, axis, state);
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            gui.setTrafficLight(intersectionIndex, axis, state);
+        }
     }
 
     /**
@@ -142,7 +151,8 @@ public class TrafficEnvironment {
      * @return Texto informativo da perturbação
      */
     public String getDisruptionNotice() {
-        return CitySimulationGUI.getInstance().getDisruptionNotice();
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getDisruptionNotice() : "Condições Normais";
     }
 
     /* =========================================================================
@@ -155,7 +165,8 @@ public class TrafficEnvironment {
      * @return Média de espera em segundos
      */
     public double getAverageWaitSeconds() {
-        return CitySimulationGUI.getInstance().getAverageWaitSeconds();
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getAverageWaitSeconds() : 0.0;
     }
 
     /**
@@ -164,7 +175,8 @@ public class TrafficEnvironment {
      * @return Contagem de passagens efetuadas com sucesso
      */
     public long getTotalCompletedPasses() {
-        return CitySimulationGUI.getInstance().getTotalCompletedPasses();
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getTotalCompletedPasses() : 0L;
     }
 
     /**
@@ -173,7 +185,8 @@ public class TrafficEnvironment {
      * @return Total de preempções
      */
     public int getPreemptionCount() {
-        return CitySimulationGUI.getInstance().getPreemptionCount();
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getPreemptionCount() : 0;
     }
 
     /* =========================================================================

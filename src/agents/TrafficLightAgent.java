@@ -76,6 +76,14 @@ public class TrafficLightAgent extends Agent {
                     authority.updateTick(waitingNS, waitingEW);
                 }
             });
+
+            // Reporte Periódico de Telemetria ao Agente Coordenador Central (Fase 3 - Protocolo FIPA)
+            addBehaviour(new TickerBehaviour(this, 2500) {
+                @Override
+                protected void onTick() {
+                    enviarEstadoAoCoordenador();
+                }
+            });
         }
 
         // 5. Comportamento Cíclico: Receção e tratamento de mensagens FIPA-ACL
@@ -90,6 +98,30 @@ public class TrafficLightAgent extends Agent {
                 }
             }
         });
+    }
+
+    /**
+     * Envia o estado operacional e métricas de tráfego do cruzamento ao Coordenador Central.
+     */
+    private void enviarEstadoAoCoordenador() {
+        TrafficEnvironment env = TrafficEnvironment.getInstance();
+        int waitingNS = env.getWaitingVehiclesCount(intersectionIndex, 0);
+        int waitingEW = env.getWaitingVehiclesCount(intersectionIndex, 1);
+        boolean hasEmerg = env.hasEmergencyApproaching(intersectionIndex, 0) || env.hasEmergencyApproaching(intersectionIndex, 1);
+
+        ACLMessage statusMsg = new ACLMessage(ACLMessage.INFORM);
+        statusMsg.addReceiver(new AID("AgenteCoordenadorCentral", AID.ISLOCALNAME));
+        statusMsg.setOntology("traffic-status");
+        statusMsg.setConversationId("status-c" + (intersectionIndex + 1));
+        statusMsg.setContent("STATUS;intersection=" + intersectionIndex 
+                + ";waitingNS=" + waitingNS 
+                + ";waitingEW=" + waitingEW 
+                + ";phase=" + authority.getCurrentPhase().name() 
+                + ";greenDuration=" + authority.getCurrentGreenDuration() 
+                + ";emergency=" + hasEmerg 
+                + ";timestamp=" + System.currentTimeMillis());
+
+        send(statusMsg);
     }
 
     /**
@@ -131,6 +163,43 @@ public class TrafficLightAgent extends Agent {
             public void onEmergencyCleared(EmergencyRequest req) {
                 System.out.println("[TrafficLightAgent " + direction + "] Notificação de desimpedimento recebida para " 
                         + req.vehicleId + " no Cruzamento C" + (intersectionIndex + 1));
+            }
+
+            @Override
+            public void onCoordinationApplied(IntersectionSafetyAuthority.CoordinationPolicy policy) {
+                // Notifica o coordenador central de que a diretiva foi efetivamente executada
+                System.out.println("[TrafficLightAgent " + direction + "] >>> Diretiva " + policy.cmdId 
+                        + " APLICADA no Cruzamento C" + (intersectionIndex + 1) + ". A notificar Coordenador Central...");
+
+                ACLMessage appliedMsg = new ACLMessage(ACLMessage.INFORM);
+                appliedMsg.addReceiver(new AID("AgenteCoordenadorCentral", AID.ISLOCALNAME));
+                appliedMsg.setOntology("coordination-policy");
+                appliedMsg.setConversationId("coord-applied-" + policy.cmdId);
+                appliedMsg.setContent("APPLIED;cmdId=" + policy.cmdId 
+                        + ";intersection=" + intersectionIndex 
+                        + ";axis=" + policy.targetAxis 
+                        + ";duration=" + policy.plannedDurationMs 
+                        + ";policyType=" + policy.policyType 
+                        + ";timestamp=" + System.currentTimeMillis());
+
+                send(appliedMsg);
+            }
+
+            @Override
+            public void onCoordinationRejected(IntersectionSafetyAuthority.CoordinationPolicy policy, String reason) {
+                System.out.println("[TrafficLightAgent " + direction + "] Diretiva " + policy.cmdId 
+                        + " REJEITADA/ABORTADA no Cruzamento C" + (intersectionIndex + 1) + ". Motivo: " + reason);
+
+                ACLMessage rejMsg = new ACLMessage(ACLMessage.REFUSE);
+                rejMsg.addReceiver(new AID("AgenteCoordenadorCentral", AID.ISLOCALNAME));
+                rejMsg.setOntology("coordination-policy");
+                rejMsg.setConversationId("coord-rejected-" + policy.cmdId);
+                rejMsg.setContent("REJECTED;cmdId=" + policy.cmdId 
+                        + ";intersection=" + intersectionIndex 
+                        + ";reason=" + reason 
+                        + ";timestamp=" + System.currentTimeMillis());
+
+                send(rejMsg);
             }
         });
     }
@@ -229,7 +298,66 @@ public class TrafficLightAgent extends Agent {
             // Aumenta tempos de segurança (amarelo e all-red) durante condições adversas
             authority.setYellowDuration(2000);
             authority.setAllRedDuration(1500);
+            return;
         }
+
+        // 5. Diretiva de Coordenação Global / Onda Verde (Fase 3 - Feature 4)
+        if ("coordination-policy".equalsIgnoreCase(ontology)) {
+            System.out.println("[TrafficLightAgent " + direction + "] Diretiva de coordenação recebida de " 
+                    + msg.getSender().getLocalName() + ": " + msg.getContent());
+
+            if (msg.getPerformative() == ACLMessage.REQUEST) {
+                // Parser do comando: POLICY;cmdId=...;policyType=...;targetAxis=...;plannedDuration=...;offsetMs=...;validUntil=...
+                String content = msg.getContent();
+                java.util.Map<String, String> params = parseParameters(content);
+
+                String cmdId = params.getOrDefault("cmdId", "CMD_UNKNOWN");
+                String policyType = params.getOrDefault("policyType", "BALANCED");
+                int targetAxis = Integer.parseInt(params.getOrDefault("targetAxis", String.valueOf(axis)));
+                long plannedDuration = Long.parseLong(params.getOrDefault("plannedDuration", "5000"));
+                long offsetMs = Long.parseLong(params.getOrDefault("offsetMs", "0"));
+                long validUntil = Long.parseLong(params.getOrDefault("validUntil", String.valueOf(System.currentTimeMillis() + 10000)));
+
+                IntersectionSafetyAuthority.CoordinationPolicy policy =
+                        new IntersectionSafetyAuthority.CoordinationPolicy(cmdId, policyType, targetAxis, plannedDuration, offsetMs, validUntil);
+
+                String evalResult = authority.evaluateAndRegisterCoordinationPolicy(policy);
+
+                if ("ACCEPTED".equals(evalResult)) {
+                    // Resposta FIPA: AGREE
+                    ACLMessage agree = msg.createReply();
+                    agree.setPerformative(ACLMessage.AGREE);
+                    agree.setOntology("coordination-policy");
+                    agree.setConversationId("coord-agree-" + cmdId);
+                    agree.setContent("AGREE;cmdId=" + cmdId + ";intersection=" + intersectionIndex + ";status=ACCEPTED");
+                    send(agree);
+                } else {
+                    // Resposta FIPA: REFUSE
+                    ACLMessage refuse = msg.createReply();
+                    refuse.setPerformative(ACLMessage.REFUSE);
+                    refuse.setOntology("coordination-policy");
+                    refuse.setConversationId("coord-refuse-" + cmdId);
+                    refuse.setContent("REFUSE;cmdId=" + cmdId + ";intersection=" + intersectionIndex + ";reason=" + evalResult);
+                    send(refuse);
+                }
+            }
+        }
+    }
+
+    /**
+     * Utilitário para parsing de parâmetros chave-valor em formato FIPA textual (ex: "cmdId=123;axis=0").
+     */
+    private java.util.Map<String, String> parseParameters(String content) {
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        if (content == null) return map;
+        String[] parts = content.split(";");
+        for (String part : parts) {
+            String[] kv = part.split("=", 2);
+            if (kv.length == 2) {
+                map.put(kv[0].trim(), kv[1].trim());
+            }
+        }
+        return map;
     }
 
     @Override
