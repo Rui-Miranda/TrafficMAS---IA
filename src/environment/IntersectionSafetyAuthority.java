@@ -233,6 +233,7 @@ public class IntersectionSafetyAuthority {
     }
 
     private void fireGreenGranted(EmergencyRequest req) {
+        metrics.TrafficMetricsCollector.getInstance().recordEmergencyGreenGranted(req.vehicleId, intersectionIndex);
         for (EmergencyPhaseListener l : phaseListeners) {
             try { l.onGreenGranted(req); } catch (Throwable ignored) {}
         }
@@ -322,6 +323,7 @@ public class IntersectionSafetyAuthority {
 
         processedCmdIds.add(policy.cmdId);
         this.activePolicy = policy;
+        metrics.TrafficMetricsCollector.getInstance().recordCoordinationAccepted(policy.cmdId, intersectionIndex);
 
         System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                 + "] Diretiva de coordenação " + policy.cmdId + " (" + policy.policyType 
@@ -335,6 +337,7 @@ public class IntersectionSafetyAuthority {
             policy.setApplied(true);
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Diretiva de coordenação " + policy.cmdId + " aplicada de imediato na fase verde ativa.");
+            metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(policy.cmdId, intersectionIndex);
             fireCoordinationApplied(policy);
         }
 
@@ -348,6 +351,7 @@ public class IntersectionSafetyAuthority {
         if (activePolicy != null) {
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Diretiva de coordenação " + activePolicy.cmdId + " cancelada. Motivo: " + reason);
+            metrics.TrafficMetricsCollector.getInstance().recordCoordinationPreempted(activePolicy.cmdId, intersectionIndex, reason);
             fireCoordinationRejected(activePolicy, reason);
             activePolicy = null;
         }
@@ -425,12 +429,14 @@ public class IntersectionSafetyAuthority {
         EmergencyRequest newReq = new EmergencyRequest(vehicleId, axis, now, senderAID);
         activeRequestsByVehicle.put(vehicleId, newReq);
         emergencyQueue.add(newReq);
+        metrics.TrafficMetricsCollector.getInstance().recordEmergencyRequest(vehicleId, intersectionIndex, axis);
 
         // Notifica confirmação 1: PEDIDO RECEBIDO
         fireRequestReceived(newReq);
 
         // 3. Avalia aceitação imediata
         newReq.setStatus(EmergencyStatus.ACEITE);
+        metrics.TrafficMetricsCollector.getInstance().recordEmergencyAccepted(vehicleId, intersectionIndex);
         fireRequestAccepted(newReq);
 
         // Precedência Absoluta de Emergência: anula qualquer política de coordenação conflitual
@@ -450,6 +456,7 @@ public class IntersectionSafetyAuthority {
      * @param vehicleId Identificador da viatura
      */
     public synchronized void notifyEmergencyCleared(String vehicleId) {
+        metrics.TrafficMetricsCollector.getInstance().recordEmergencyCleared(vehicleId, intersectionIndex);
         if (currentlyServingEmergency != null && currentlyServingEmergency.vehicleId.equals(vehicleId)) {
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Viatura " + vehicleId + " transpôs o cruzamento. A concluir atendimento de socorro.");
@@ -599,6 +606,7 @@ public class IntersectionSafetyAuthority {
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                                         + "] Diretiva de coordenação " + activePolicy.cmdId 
                                         + " aplicada com sucesso ao abrir fase EW_GREEN (" + currentGreenDuration + "ms).");
+                                metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(activePolicy.cmdId, intersectionIndex);
                                 fireCoordinationApplied(activePolicy);
                                 activePolicy = null;
                             } else {
@@ -612,6 +620,7 @@ public class IntersectionSafetyAuthority {
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                                         + "] Diretiva de coordenação " + activePolicy.cmdId 
                                         + " aplicada com sucesso ao abrir fase NS_GREEN (" + currentGreenDuration + "ms).");
+                                metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(activePolicy.cmdId, intersectionIndex);
                                 fireCoordinationApplied(activePolicy);
                                 activePolicy = null;
                             } else {

@@ -250,6 +250,20 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getPreemptionCount() : 0;
     }
 
+    /**
+     * Obtém o coletor centralizado de métricas e telemetria da simulação.
+     */
+    public metrics.TrafficMetricsCollector getMetricsCollector() {
+        return metrics.TrafficMetricsCollector.getInstance();
+    }
+
+    /**
+     * Obtém uma fotografia consolidada das métricas da execução atual.
+     */
+    public metrics.TrafficMetricsSnapshot getMetricsSnapshot(String runId, String scenario, String controlMode, long seed) {
+        return metrics.TrafficMetricsCollector.getInstance().getSnapshot(runId, scenario, controlMode, seed);
+    }
+
     /* =========================================================================
      * MÉTODOS DE COMPATIBILIDADE RETROATIVA
      * ========================================================================= */

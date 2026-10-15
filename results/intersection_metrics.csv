@@ -1,0 +1,5 @@
+runId,scenario,controlMode,seed,intersectionIndex,intersectionName,crossings,throughputVehiclesPerMinute,averageWaitingTimeSeconds,averageQueueLength,maximumQueueLength,emergencyRequests,emergencyPreemptions,coordinationApplied
+RUN_EVAL_INTEGRATION_001,INTENSE_RAIN,D_COORD_ML,42,0,C1_NW,8,1.60,3.00,3.00,4,1,1,1
+RUN_EVAL_INTEGRATION_001,INTENSE_RAIN,D_COORD_ML,42,1,C2_NE,6,1.20,5.00,4.00,5,1,1,1
+RUN_EVAL_INTEGRATION_001,INTENSE_RAIN,D_COORD_ML,42,2,C3_SW,6,1.20,3.00,1.50,2,0,0,1
+RUN_EVAL_INTEGRATION_001,INTENSE_RAIN,D_COORD_ML,42,3,C4_SE,4,0.80,2.00,0.50,1,0,0,1

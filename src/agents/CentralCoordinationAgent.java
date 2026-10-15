@@ -283,6 +283,7 @@ public class CentralCoordinationAgent extends Agent {
                                                                        targetAxis, plannedDurationMs, offsetMs);
         commandRecords.put(cmdId, record);
         commandHistory.add(cmdId);
+        metrics.TrafficMetricsCollector.getInstance().recordCoordinationIssued(cmdId, intersectionIdx, policyType, plannedDurationMs);
 
         String crossingName = CROSSINGS[intersectionIdx];
         String axisPrefix = (targetAxis == 0) ? "NS" : "EW";
@@ -517,6 +518,7 @@ public class CentralCoordinationAgent extends Agent {
             lastMLAlertSpeedMultiplier = speedMult;
             lastMLAlertReceivedMs = now;
             mlAlertCount++;
+            metrics.TrafficMetricsCollector.getInstance().recordMLAlert(alertId, intersection, probability, riskType);
 
             int probPercent = (int) Math.round(probability * 100);
             String nivel = (probPercent >= 70) ? "CRÍTICO" : ((probPercent >= 40) ? "MODERADO" : "BAIXO");

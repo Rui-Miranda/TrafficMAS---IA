@@ -39,6 +39,8 @@ public class CitySimulationGUI extends JFrame {
         // Métricas individuais de telemetria e espera (Feature 8)
         public long totalWaitMillis = 0;
         public long currentStopStartMillis = 0;
+        public int crossingIntersection = -1;
+        public double currentCrossingWaitSeconds = 0.0;
 
         // Estado da manobra dentro do cruzamento
         public boolean inIntersection = false;
@@ -137,6 +139,13 @@ public class CitySimulationGUI extends JFrame {
             // Loop de simulação a ~30 FPS
             Timer timer = new Timer(30, e -> {
                 tickCounter++;
+                metrics.TrafficMetricsCollector.getInstance().advanceSimulatedTime(0.03333333333333333);
+                if (tickCounter % 30 == 0) {
+                    for (int i = 0; i < 4; i++) {
+                        metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 0, getWaitingCount(i, 0));
+                        metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 1, getWaitingCount(i, 1));
+                    }
+                }
                 calculateFps();
                 updatePositions();
                 panel.repaint();
@@ -388,29 +397,41 @@ public class CitySimulationGUI extends JFrame {
     }
 
     public synchronized double getAverageWaitSeconds() {
-        if (totalCompletedPasses == 0) {
-            long stopped = vehicles.stream().filter(v -> v.currentSpeed < 0.2).count();
-            return stopped * 1.5;
+        double avg = metrics.TrafficMetricsCollector.getInstance().getAverageWaitingTimeSeconds();
+        if (avg >= 0.0) {
+            return Math.round(avg * 10.0) / 10.0;
         }
-        return Math.round((totalWaitTimeSeconds / totalCompletedPasses) * 10.0) / 10.0;
+        return (totalCompletedPasses > 0) ? Math.round((totalWaitTimeSeconds / totalCompletedPasses) * 10.0) / 10.0 : 0.0;
     }
 
     public synchronized long getTotalCompletedPasses() {
-        return totalCompletedPasses;
+        long c = metrics.TrafficMetricsCollector.getInstance().getTotalCrossings();
+        return (c > 0) ? c : totalCompletedPasses;
     }
 
     public synchronized int getPreemptionCount() {
-        return preemptionCount;
+        int p = metrics.TrafficMetricsCollector.getInstance().getEmergencyPreemptions();
+        return (p > 0) ? p : preemptionCount;
+    }
+
+    private synchronized void recordIntersectionCrossing(VisualVehicle v, int interIdx) {
+        if (interIdx < 0 || interIdx >= 4) return;
+        int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+        double wait = v.currentCrossingWaitSeconds;
+        if (v.currentStopStartMillis > 0) {
+            wait += (System.currentTimeMillis() - v.currentStopStartMillis) / 1000.0;
+            v.currentStopStartMillis = 0;
+        }
+        v.currentCrossingWaitSeconds = 0.0;
+        v.totalWaitMillis = 0;
+
+        metrics.TrafficMetricsCollector.getInstance().recordCrossing(v.id, interIdx, axis, wait);
+        totalCompletedPasses++;
+        totalWaitTimeSeconds += wait;
     }
 
     private synchronized void recordVehiclePass(VisualVehicle v) {
-        totalCompletedPasses++;
-        if (v.currentStopStartMillis > 0) {
-            v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
-            v.currentStopStartMillis = 0;
-        }
-        totalWaitTimeSeconds += (v.totalWaitMillis / 1000.0);
-        v.totalWaitMillis = 0;
+        // Legado mantido para compatibilidade, agora alimentado por recordIntersectionCrossing
     }
 
     private void updatePositions() {
@@ -494,6 +515,7 @@ public class CitySimulationGUI extends JFrame {
                 if (limitDist <= 2.0) {
                     v.currentSpeed = 0.0;
                     v.wasStopped = true;
+                    v.currentCrossingWaitSeconds += 0.03333333333333333;
                     if (v.currentStopStartMillis == 0) {
                         v.currentStopStartMillis = System.currentTimeMillis();
                     }
@@ -530,6 +552,8 @@ public class CitySimulationGUI extends JFrame {
                 if (v.intent == ManeuverIntent.TURN_RIGHT || v.intent == ManeuverIntent.TURN_LEFT) {
                     initiateIntersectionTurn(v, nextIntersectionIdx);
                     continue;
+                } else {
+                    v.crossingIntersection = nextIntersectionIdx;
                 }
             }
 
@@ -541,11 +565,35 @@ public class CitySimulationGUI extends JFrame {
                 case 3: v.x -= v.currentSpeed; v.headingAngle = Math.PI; break;
             }
 
-            // Wrap-around contínuo com registo de telemetria
-            if (v.y > 1030) { v.y = -30; v.wasStopped = false; recordVehiclePass(v); }
-            if (v.y < -40) { v.y = 1010; v.wasStopped = false; recordVehiclePass(v); }
-            if (v.x > 1030) { v.x = -30; v.wasStopped = false; recordVehiclePass(v); }
-            if (v.x < -40) { v.x = 1010; v.wasStopped = false; recordVehiclePass(v); }
+            // Verificação de conclusão de travessia retilínea na linha de saída do cruzamento
+            if (v.crossingIntersection >= 0) {
+                boolean exited = false;
+                int ix = v.crossingIntersection;
+                switch (v.direction) {
+                    case 0: // N->S
+                        exited = (ix == 0 || ix == 1) ? (v.y >= ROAD_Y1 + ROAD_WIDTH) : (v.y >= ROAD_Y2 + ROAD_WIDTH);
+                        break;
+                    case 1: // S->N
+                        exited = (ix == 2 || ix == 3) ? (v.y <= ROAD_Y2) : (v.y <= ROAD_Y1);
+                        break;
+                    case 2: // W->E
+                        exited = (ix == 0 || ix == 2) ? (v.x >= ROAD_X1 + ROAD_WIDTH) : (v.x >= ROAD_X2 + ROAD_WIDTH);
+                        break;
+                    case 3: // E->W
+                        exited = (ix == 1 || ix == 3) ? (v.x <= ROAD_X2) : (v.x <= ROAD_X1);
+                        break;
+                }
+                if (exited) {
+                    recordIntersectionCrossing(v, ix);
+                    v.crossingIntersection = -1;
+                }
+            }
+
+            // Wrap-around contínuo da malha urbana
+            if (v.y > 1030) { v.y = -30; v.wasStopped = false; v.crossingIntersection = -1; }
+            if (v.y < -40) { v.y = 1010; v.wasStopped = false; v.crossingIntersection = -1; }
+            if (v.x > 1030) { v.x = -30; v.wasStopped = false; v.crossingIntersection = -1; }
+            if (v.x < -40) { v.x = 1010; v.wasStopped = false; v.crossingIntersection = -1; }
         }
     }
 
@@ -654,6 +702,8 @@ public class CitySimulationGUI extends JFrame {
         if (v.turnProgress >= 1.0) {
             // Conclusão da manobra: restaura movimento retilíneo na nova direção
             v.inIntersection = false;
+            recordIntersectionCrossing(v, v.activeIntersection);
+            v.activeIntersection = -1;
             v.x = v.turnEndX;
             v.y = v.turnEndY;
             v.headingAngle = v.turnTargetAngle;
