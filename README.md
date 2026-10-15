@@ -78,18 +78,27 @@ TrafficMAS---IA/
 │   │   ├── TrafficEnvironment.java         # Fachada oficial de sensores/atuadores (compatível com headless)
 │   │   └── CitySimulationGUI.java          # Interface visual com cinemática contínua de 4 cruzamentos
 │   ├── ml/
+│   │   ├── Classifier.java                 # Interface unificada para algoritmos de ML
+│   │   ├── StandardScaler.java             # Normalizador Z-score anti-leakage
+│   │   ├── LogisticRegression.java         # Modelo A: Regressão Logística L2 + Gradient Descent
+│   │   ├── DecisionTreeClassifier.java     # Modelo B: Árvore de Decisão CART com impureza de Gini
+│   │   ├── MajorityClassBaseline.java      # Classificador baseline de classe maioritária
+│   │   ├── ModelEvaluator.java             # Avaliador estatístico (Accuracy, Precision, Recall, F1, Matriz de Confusão)
+│   │   ├── DatasetLoader.java              # Carregador e particionador sem leakage
+│   │   ├── ModelComparisonExperiment.java  # Comparador empírico em TRAIN e VAL
 │   │   ├── TrafficDatasetGenerator.java    # Orquestrador de 16 corridas com horizonte t + 60s
 │   │   └── DatasetValidator.java           # Validador de integridade, leakage e splits
 │   └── test/
 │       ├── SafetyTestSuite.java            # Suite Fase 1: Segurança de fases e emergências (7 testes)
 │       ├── VehicleTestSuite.java           # Suite Fase 2: Deteção de cruzamentos e DF dos veículos (7 testes)
 │       ├── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
-│       └── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (8 testes)
+│       ├── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (8 testes)
+│       └── MachineLearningModelTest.java   # Suite Fase 4 (Etapa 2): Validação dos modelos de ML (14 testes)
 ├── bin/                             # Binários compilados (.class)
 ├── run.bat                          # Execução rápida da simulação (Windows)
 ├── run.ps1                          # Execução rápida da simulação (PowerShell)
-├── run_tests.bat                    # Execução das 4 suites de testes automatizados (Batch)
-├── run_tests.ps1                    # Execução das 4 suites de testes automatizados (PowerShell)
+├── run_tests.bat                    # Execução das 5 suites de testes automatizados (Batch)
+├── run_tests.ps1                    # Execução das 5 suites de testes automatizados (PowerShell)
 ├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo IEEE
 └── README.md                        # Documentação principal
 ```
@@ -122,7 +131,7 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
 
 ## 5. Execução dos Testes Automatizados (Fases 1, 2, 3 e 4)
 
-O projeto dispõe de **33 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, e a validação estrita do dataset de Machine Learning.
+O projeto dispõe de **47 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML e a conformidade matemática dos modelos de aprendizagem supervisionada.
 
 ### Executar Todas as Suites de Testes (Recomendado):
 ```powershell
@@ -144,6 +153,9 @@ java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar"
 
 # Fase 4 (Etapa 1): Validação do Dataset de ML (8 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.DatasetValidationTest
+
+# Fase 4 (Etapa 2): Modelos de ML e Métricas Estatísticas (14 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MachineLearningModelTest
 ```
 
 ---
@@ -159,7 +171,16 @@ O ficheiro CSV resultante é salvo em `data/traffic_disruption_dataset.csv`.
 
 ---
 
-## 7. Calendário Operacional e Entregas
+## 7. Treino e Avaliação dos Modelos de ML (Fase 4 — Etapa 2)
+
+Para treinar os modelos supervisionados (Baseline, Regressão Logística L2 e Árvore CART) exclusivamente em `TRAIN` e comparar as métricas em `VAL`:
+```powershell
+java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" ml.ModelComparisonExperiment
+```
+
+---
+
+## 8. Calendário Operacional e Entregas
 
 * **Entrega Intermédia (30%):** **1 de Novembro** (Apresentação e Demonstração Laboratorial Obrigatória: **2 a 4 de Novembro**).
 * **Entrega Final (70%):** **3 de Janeiro** (Demonstração: 20%, Código-Fonte: 25%, Artigo Científico SCImago Q1/Q2/Q3: 25%).
