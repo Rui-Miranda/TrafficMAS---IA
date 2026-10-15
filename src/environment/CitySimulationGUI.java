@@ -179,10 +179,25 @@ public class CitySimulationGUI extends JFrame {
         return instance;
     }
 
+    public synchronized void setTrafficLights(int intersectionIndex, LightState nsState, LightState ewState) {
+        if (intersectionIndex >= 0 && intersectionIndex < 4) {
+            lights[intersectionIndex][0] = nsState;
+            lights[intersectionIndex][1] = ewState;
+            IntersectionSafetyAuthority.assertSafetyInvariant(lights[intersectionIndex][0], lights[intersectionIndex][1]);
+        }
+    }
+
     public synchronized void setTrafficLight(int intersectionIndex, int axis, LightState state) {
         if (intersectionIndex >= 0 && intersectionIndex < 4 && axis >= 0 && axis <= 1) {
             lights[intersectionIndex][axis] = state;
             IntersectionSafetyAuthority.assertSafetyInvariant(lights[intersectionIndex][0], lights[intersectionIndex][1]);
+        }
+    }
+
+    public synchronized void resetLights() {
+        for (int i = 0; i < 4; i++) {
+            lights[i][0] = (i % 2 == 0) ? LightState.GREEN : LightState.RED;
+            lights[i][1] = (i % 2 == 0) ? LightState.RED : LightState.GREEN;
         }
     }
 

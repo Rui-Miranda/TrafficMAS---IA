@@ -83,7 +83,7 @@ public class TrafficDatasetGenerator {
     public static List<DatasetRecord> generateDataset(long masterSeed) {
         List<DatasetRecord> allRecords = new ArrayList<>();
 
-        // 8 cenários distintos (2 corridas independentes por cenário = 16 corridas no total)
+        // 8 cenários distintos (6 corridas independentes por cenário = 48 corridas no total)
         String[] scenarios = {
             "NORMAL", "INTENSE", "ASYMMETRIC", "RAIN", 
             "FOG", "ACCIDENT", "ROADWORK", "SPECIAL_EVENT"
@@ -92,22 +92,15 @@ public class TrafficDatasetGenerator {
         int runIndex = 1;
 
         for (String scenario : scenarios) {
-            for (int r = 1; r <= 2; r++) {
+            for (int r = 1; r <= 6; r++) {
                 String runId = String.format("RUN_%02d_%s", runIndex, scenario);
                 long seed = masterSeed + (runIndex * 1013L);
 
-                // Particionamento estrito por corrida independente:
-                // Runs 1 a 11: TRAIN (~70%)
-                // Runs 12 e 13: VAL (~12%)
-                // Runs 14 a 16: TEST (~18%)
-                String split;
-                if (runIndex <= 11) {
-                    split = "TRAIN";
-                } else if (runIndex <= 13) {
-                    split = "VAL";
-                } else {
-                    split = "TEST";
-                }
+                // Particionamento estrito e balanceado por corrida independente:
+                // Runs 1 a 4: TRAIN (66.7%)
+                // Run 5: VAL (16.7%)
+                // Run 6: TEST (16.7%)
+                String split = (r <= 4) ? "TRAIN" : ((r == 5) ? "VAL" : "TEST");
 
                 List<DatasetRecord> runRecords = executeSimulationRun(runId, scenario, split, seed);
                 allRecords.addAll(runRecords);
@@ -226,14 +219,8 @@ public class TrafficDatasetGenerator {
         System.out.printf(Locale.US, "      • Classe 1 (Congestionado): %d (%.1f%%)\n", positiveCount, positivePct);
 
         try {
-            File existing = new File(DATASET_CSV_PATH);
-            if (!existing.exists()) {
-                saveToCsv(records, DATASET_CSV_PATH);
-                System.out.println("\n[SUCESSO] Ficheiro CSV gerado e salvo em: " + DATASET_CSV_PATH);
-            } else {
-                saveToCsv(records, "data/traffic_disruption_dataset_validation.csv");
-                System.out.println("\n[SUCESSO] Ficheiro CSV gerado e salvo em: data/traffic_disruption_dataset_validation.csv (preservando dataset congelado)");
-            }
+            saveToCsv(records, DATASET_CSV_PATH);
+            System.out.println("\n[SUCESSO] Ficheiro CSV gerado e salvo em: " + DATASET_CSV_PATH);
         } catch (IOException e) {
             System.err.println("[ERRO] Falha ao salvar CSV: " + e.getMessage());
             System.exit(1);

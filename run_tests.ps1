@@ -7,8 +7,8 @@ if (-not (Test-Path "bin")) {
     New-Item -ItemType Directory -Path "bin" | Out-Null
 }
 
-Write-Host "[1/9] A compilar fontes e testes..." -ForegroundColor Yellow
-javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/test/*.java
+Write-Host "[1/11] A compilar fontes e testes..." -ForegroundColor Yellow
+javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERRO] Falha durante a compilacao dos testes!" -ForegroundColor Red
@@ -78,7 +78,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[9/9] A executar suite de metricas e exportacao (Fase 5 - Etapa 1)..." -ForegroundColor Green
+Write-Host "[9/11] A executar suite de metricas e exportacao (Fase 5 - Etapa 1)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficMetricsTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -87,6 +87,24 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
+Write-Host "[10/11] A executar suite de validacao do SimulationClock (Fase 5 - Checkpoint B)..." -ForegroundColor Green
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SimulationClockValidationTest
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERRO] Testes de Validacao do SimulationClock falharam!" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+Write-Host ""
+Write-Host "[11/11] A executar suite de infraestrutura experimental e piloto (Fase 5 - Etapa 2)..." -ForegroundColor Green
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficExperimentTestSuite
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERRO] Testes de Infraestrutura Experimental falharam!" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+Write-Host ""
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "   TODAS AS SUITES DE TESTES (89 TESTES - FASES 1 A 5) FORAM CONCLUIDAS!" -ForegroundColor Green
+Write-Host "   TODAS AS 11 SUITES DE TESTES (110 TESTES - FASES 1 A 5) FORAM CONCLUIDAS!" -ForegroundColor Green
 Write-Host "================================================================================" -ForegroundColor Cyan

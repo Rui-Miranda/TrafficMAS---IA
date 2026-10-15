@@ -127,10 +127,13 @@ public class CentralCoordinationAgent extends Agent {
 
         System.out.println("[CentralCoordinationAgent] Agente Coordenador Central online na malha urbana (4 cruzamentos).");
 
-        // 2. Comportamento Periódico: Auditoria e Tomada de Decisão Macro (a cada 3.5 segundos)
+        // 2. Comportamento Periódico: Auditoria e Tomada de Decisão Macro (a cada 3.5 segundos em modo tempo real)
         addBehaviour(new TickerBehaviour(this, 3500) {
             @Override
             protected void onTick() {
+                if (environment.SimulationClock.isSimulatedMode()) {
+                    return;
+                }
                 auditarRedeETomarDecisoes();
             }
         });

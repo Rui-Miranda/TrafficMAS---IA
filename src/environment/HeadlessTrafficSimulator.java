@@ -80,7 +80,9 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         }
 
         public boolean isSevereCongestion() {
-            return (queueLength >= 6) || (queueLength >= 5 && averageWaitingTime >= 14.0);
+            return (queueLength >= 4) || 
+                   (queueLength >= 3 && averageWaitingTime >= 5.0) ||
+                   (averageSpeed < 1.05 && trafficVolume >= 3);
         }
     }
 
@@ -110,15 +112,15 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         this.rng = new Random(randomSeed);
         this.controlMode = (mode != null) ? mode : IntersectionSafetyAuthority.ControlMode.LOCAL_ADAPTIVE;
 
-        // Inicializa ou reaproveita as 4 autoridades semafóricas oficiais do cruzamento
+        // Ativa o modo simulado e reinicia as 4 autoridades semafóricas oficiais
+        SimulationClock.enableSimulatedMode(0L);
+        SimulationClock.setSimulatedTimeSeconds(0.0);
+        IntersectionSafetyAuthority.resetAll();
+
         for (int i = 0; i < 4; i++) {
             authorities[i] = IntersectionSafetyAuthority.getAuthority(i);
             authorities[i].setControlMode(this.controlMode);
         }
-
-        // Ativa o modo simulado e conecta o provedor de dados de ambiente
-        SimulationClock.enableSimulatedMode(0L);
-        SimulationClock.setSimulatedTimeSeconds(0.0);
         TrafficEnvironment.setCustomDataProvider(this);
 
         // Configuração dos parâmetros segundo o cenário
@@ -335,6 +337,15 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
             double distToLeader = getDistanceToLeadingVehicle(v);
             boolean blockedByLeader = (distToLeader < 38.0);
 
+            // Deteção e pedido de socorro prioritário para viaturas de emergência
+            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia") || v.id.startsWith("Policia")) {
+                int interIdx = getTargetIntersection(v);
+                int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+                if (distToStop >= 0 && distToStop <= 250.0) {
+                    authorities[interIdx].requestEmergency(v.id, axis, v.id);
+                }
+            }
+
             boolean brakeForYellow = (light == CitySimulationGUI.LightState.YELLOW && distToStop <= 55 && distToStop > 15);
             boolean brakeForRed = (light == CitySimulationGUI.LightState.RED && distToStop <= 65);
             boolean shouldBrake = blockedByLeader || brakeForYellow || brakeForRed;
@@ -446,6 +457,9 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         }
 
         if (crossed && interIdx >= 0) {
+            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia") || v.id.startsWith("Policia")) {
+                authorities[interIdx].notifyEmergencyCleared(v.id);
+            }
             double wait = v.totalWaitSeconds;
             if (v.currentStopStartSeconds >= 0) {
                 wait += (currentSimTime - v.currentStopStartSeconds);

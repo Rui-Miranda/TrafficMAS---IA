@@ -172,6 +172,10 @@ public class IntersectionSafetyAuthority {
     /** Reinicia todas as autoridades (útil para suites de testes) */
     public static synchronized void resetAll() {
         AUTHORITIES.clear();
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            gui.resetLights();
+        }
     }
 
     // Identificação do cruzamento
@@ -279,6 +283,10 @@ public class IntersectionSafetyAuthority {
 
     public synchronized LightState getLightState(int axis) {
         return (axis == 0) ? currentPhase.nsState : currentPhase.ewState;
+    }
+
+    public synchronized EmergencyRequest getCurrentlyServingEmergency() {
+        return currentlyServingEmergency;
     }
 
     public synchronized void setYellowDuration(long yellowDuration) {
@@ -405,11 +413,10 @@ public class IntersectionSafetyAuthority {
         this.currentPhase = newPhase;
         this.phaseStartMillis = SimulationClock.currentTimeMillis();
 
-        // Notifica o ambiente / interface gráfica
+        // Notifica o ambiente / interface gráfica de forma atómica
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         if (gui != null) {
-            gui.setTrafficLight(intersectionIndex, 0, newPhase.nsState);
-            gui.setTrafficLight(intersectionIndex, 1, newPhase.ewState);
+            gui.setTrafficLights(intersectionIndex, newPhase.nsState, newPhase.ewState);
         }
     }
 

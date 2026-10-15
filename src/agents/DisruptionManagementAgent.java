@@ -125,10 +125,13 @@ public class DisruptionManagementAgent extends Agent {
                     "Modelo ML não disponível em: " + modelPath);
         }
 
-        // 3. Comportamento Periódico: Inferência ML a cada 10 segundos
+        // 3. Comportamento Periódico: Inferência ML a cada 10 segundos (em modo tempo real)
         addBehaviour(new TickerBehaviour(this, INFERENCE_PERIOD_MS) {
             @Override
             protected void onTick() {
+                if (environment.SimulationClock.isSimulatedMode()) {
+                    return;
+                }
                 if (mlModelLoaded) {
                     executarInferenciaMLOperacional();
                 } else {

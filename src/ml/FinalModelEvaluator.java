@@ -14,8 +14,15 @@ public class FinalModelEvaluator {
 
     public static final String DATASET_CSV_PATH = "data/traffic_disruption_dataset.csv";
     public static final String MODEL_BIN_PATH = "data/traffic_model.bin";
-    public static final String DATASET_SHA256 = "89EFA713970803AE7644864924C8E05DBDFAEA8B82C160F018A62A335BBB9BCE";
     public static final double FROZEN_THRESHOLD = 0.40;
+
+    public static String getDatasetSha256() {
+        try {
+            return TrafficModelBundle.computeFileSha256(new java.io.File(DATASET_CSV_PATH));
+        } catch (Exception e) {
+            return "UNKNOWN";
+        }
+    }
 
     public static class DetailedTestRecord {
         public final String runId;
@@ -72,7 +79,7 @@ public class FinalModelEvaluator {
                 };
 
                 int target = Integer.parseInt(tokens[12]);
-                boolean currentlyCongested = (queueLength >= 6.0) || (queueLength >= 5.0 && averageWaitingTime >= 14.0);
+                boolean currentlyCongested = (queueLength >= 4.0) || (queueLength >= 3.0 && averageWaitingTime >= 5.0) || (averageSpeed < 1.05 && trafficVolume >= 3.0);
 
                 list.add(new DetailedTestRecord(runId, scenario, simTime, intersectionId, features, target, currentlyCongested));
             }
@@ -113,7 +120,7 @@ public class FinalModelEvaluator {
             TrafficModelBundle bundle = new TrafficModelBundle(
                     model.getModelName(), "1.0.0", model, scaler,
                     DatasetLoader.FEATURE_NAMES, FROZEN_THRESHOLD, 60.0,
-                    DATASET_SHA256, System.currentTimeMillis(), summary
+                    getDatasetSha256(), System.currentTimeMillis(), summary
             );
             ModelPersistenceManager.saveModel(bundle, MODEL_BIN_PATH);
             System.out.println("      • Ficheiro binário gravado com sucesso.");

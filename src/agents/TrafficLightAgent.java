@@ -70,6 +70,9 @@ public class TrafficLightAgent extends Agent {
             addBehaviour(new TickerBehaviour(this, 100) {
                 @Override
                 protected void onTick() {
+                    if (environment.SimulationClock.isSimulatedMode()) {
+                        return;
+                    }
                     TrafficEnvironment env = TrafficEnvironment.getInstance();
                     int waitingNS = env.getWaitingVehiclesCount(intersectionIndex, 0);
                     int waitingEW = env.getWaitingVehiclesCount(intersectionIndex, 1);
