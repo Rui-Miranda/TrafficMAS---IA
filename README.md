@@ -76,8 +76,18 @@ TrafficMAS---IA/
 │   ├── environment/
 │   │   ├── HeadlessTrafficSimulator.java   # Simulador headless rápido para geração determinística de dados
 │   │   ├── IntersectionSafetyAuthority.java # Autoridade única de segurança e controlo atómico de fase
+│   │   ├── SimulationClock.java            # Relógio determinístico e síncrono para reprodução experimental
 │   │   ├── TrafficEnvironment.java         # Fachada oficial de sensores/atuadores (compatível com headless)
 │   │   └── CitySimulationGUI.java          # Interface visual com cinemática contínua de 4 cruzamentos
+│   ├── metrics/
+│   │   ├── TrafficMetricsCollector.java    # Coletor centralizado de telemetria e métricas
+│   │   ├── TrafficMetricsSnapshot.java     # Snapshot imutável de telemetria agregada e por cruzamento
+│   │   ├── RunMetricsRecord.java           # Registo estruturado de métricas por corrida
+│   │   └── CSVExporter.java                # Exportador CSV determinístico com cabeçalhos padronizados
+│   ├── experiments/
+│   │   ├── ControlMode.java                # Enumeração dos 4 modos de controlo (A, B, C, D)
+│   │   ├── ScenarioConfig.java             # Matriz de cenários (Baixo, Médio, Elevado, Emergência)
+│   │   └── TrafficExperimentRunner.java    # Orquestrador experimental com testes pareados e Wilcoxon exato
 │   ├── ml/
 │   │   ├── Classifier.java                 # Interface unificada para algoritmos de ML
 │   │   ├── StandardScaler.java             # Normalizador Z-score anti-leakage
@@ -91,21 +101,32 @@ TrafficMAS---IA/
 │   │   ├── TrafficModelBundle.java         # Bundle serializável com modelo, scaler, metadados e threshold
 │   │   ├── ModelPersistenceManager.java    # Gestor de gravação e carregamento de modelos binários
 │   │   ├── FinalModelEvaluator.java        # Avaliador final cego no conjunto TEST e análise de antecipação
-│   │   ├── TrafficDatasetGenerator.java    # Orquestrador de 16 corridas com horizonte t + 60s
+│   │   ├── TrafficDatasetGenerator.java    # Orquestrador de 48 corridas com horizonte t + 60s
 │   │   └── DatasetValidator.java           # Validador de integridade, leakage e splits
 │   └── test/
-│       ├── SafetyTestSuite.java            # Suite Fase 1: Segurança de fases e emergências (7 testes)
-│       ├── VehicleTestSuite.java           # Suite Fase 2: Deteção de cruzamentos e DF dos veículos (7 testes)
-│       ├── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (11 testes)
-│       ├── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (8 testes)
+│       ├── SafetyTestSuite.java            # Suite Fase 1: Segurança de fases e emergências (10 testes)
+│       ├── VehicleTestSuite.java           # Suite Fase 2: Deteção de cruzamentos e DF dos veículos (8 testes)
+│       ├── CoordinationTestSuite.java      # Suite Fase 3: Coordenação multiagente e Onda Verde (12 testes)
+│       ├── DatasetValidationTest.java      # Suite Fase 4 (Etapa 1): Validação do dataset de ML (6 testes)
 │       ├── MachineLearningModelTest.java   # Suite Fase 4 (Etapa 2): Validação dos modelos de ML (14 testes)
-│       ├── ModelSelectionAndPersistenceTest.java # Suite Fase 4 (Etapa 3): Seleção e persistência (12 testes)
-│       └── MLAgentIntegrationTest.java     # Suite Fase 4 (Etapa 4): Integração ML-Agente e FIPA-ACL (15 testes)
+│       ├── ModelSelectionAndPersistenceTest.java # Suite Fase 4 (Etapa 3): Seleção, persistência e isolamento (13 testes)
+│       ├── MLAgentIntegrationTest.java     # Suite Fase 4 (Etapa 4): Integração ML-Agente e FIPA-ACL (15 testes)
+│       ├── TrafficMetricsTestSuite.java    # Suite Fase 5 (Etapa 1): Métricas, telemetria e exportação (11 testes)
+│       ├── SimulationClockValidationTest.java # Suite Fase 5 (Etapa 2A): Validação do SimulationClock (16 testes)
+│       └── TrafficExperimentTestSuite.java # Suite Fase 5 (Etapa 2B): Infraestrutura experimental e piloto (15 testes)
+├── results/
+│   └── experiments/
+│       ├── raw_runs.csv                    # Registo detalhado das 32 corridas do piloto
+│       ├── scenario_summary.csv            # Agregação por cenário e modo de controlo
+│       ├── mode_comparison.csv             # Desempenho global comparativo dos 4 modos (A/B/C/D)
+│       ├── intersection_results.csv        # Métricas desagregadas pelos 4 cruzamentos (C1 a C4)
+│       ├── statistical_analysis.csv        # Teste t pareado, Wilcoxon exato, IC 95% e Cohen's d
+│       └── ml_alerts_audit.csv             # Auditoria empírica de antecipação dos 23 alertas ML (t + 60s)
 ├── bin/                             # Binários compilados (.class)
 ├── run.bat                          # Execução rápida da simulação (Windows)
 ├── run.ps1                          # Execução rápida da simulação (PowerShell)
-├── run_tests.bat                    # Execução das 7 suites de testes automatizados (Batch)
-├── run_tests.ps1                    # Execução das 7 suites de testes automatizados (PowerShell)
+├── run_tests.bat                    # Execução das 11 suites de testes automatizados (Batch)
+├── run_tests.ps1                    # Execução das 11 suites de testes automatizados (PowerShell)
 ├── GUIA_TRABALHO_PRATICO_IA.md      # Manual técnico formal e especificações do artigo IEEE
 └── README.md                        # Documentação principal
 ```
@@ -128,7 +149,7 @@ Faça duplo clique no ficheiro `run.bat` ou execute no terminal:
 ### Opção C: Compilação Manual via Linha de Comandos
 ```powershell
 # 1. Compilar todas as classes do projeto
-javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/test/*.java
+javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 # 2. Executar a plataforma multiagente
 java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
@@ -136,9 +157,9 @@ java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Main
 
 ---
 
-## 5. Execução dos Testes Automatizados (Fases 1, 2, 3 e 4)
+## 5. Execução dos Testes Automatizados (Fases 1 a 5)
 
-O projeto dispõe de **74 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML, a conformidade matemática dos modelos, a persistência/desserialização em disco e a integração operacional FIPA-ACL entre agentes.
+O projeto dispõe de **110 testes automatizados com 100% de aprovação**, cobrindo o invariante anti-colisão, a preempção de socorro, a resolução de nós viários, o protocolo completo de coordenação e onda verde, a validação do dataset de ML sem leakage, a conformidade matemática dos modelos, a persistência/desserialização em disco, a integração operacional FIPA-ACL entre agentes, o relógio determinístico `SimulationClock`, a telemetria centralizada e o harness experimental.
 
 ### Executar Todas as Suites de Testes (Recomendado):
 ```powershell
@@ -149,33 +170,42 @@ O projeto dispõe de **74 testes automatizados com 100% de aprovação**, cobrin
 
 ### Suites Individuais:
 ```powershell
-# Fase 1: Segurança e Invariante de Fases (7 testes)
+# Fase 1: Segurança e Invariante de Fases (10 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SafetyTestSuite
 
-# Fase 2: Agentes de Veículos e Deteção Espacial (7 testes)
+# Fase 2: Agentes de Veículos e Deteção Espacial (8 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.VehicleTestSuite
 
-# Fase 3: Coordenação Multiagente e Onda Verde (11 testes)
+# Fase 3: Coordenação Multiagente e Onda Verde (12 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.CoordinationTestSuite
 
-# Fase 4 (Etapa 1): Validação do Dataset de ML (8 testes)
+# Fase 4 (Etapa 1): Validação do Dataset de ML (6 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.DatasetValidationTest
 
 # Fase 4 (Etapa 2): Modelos de ML e Métricas Estatísticas (14 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MachineLearningModelTest
 
-# Fase 4 (Etapa 3): Seleção Final e Persistência do Modelo (12 testes)
+# Fase 4 (Etapa 3): Seleção Final e Persistência do Modelo (13 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.ModelSelectionAndPersistenceTest
 
 # Fase 4 (Etapa 4): Integração Operacional ML-Agente e FIPA-ACL (15 testes)
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MLAgentIntegrationTest
+
+# Fase 5 (Etapa 1): Métricas, Telemetria e Exportação CSV (11 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficMetricsTestSuite
+
+# Fase 5 (Checkpoint B): Validação do SimulationClock Determinístico (16 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SimulationClockValidationTest
+
+# Fase 5 (Etapa 2): Infraestrutura Experimental e Piloto (15 testes)
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficExperimentTestSuite
 ```
 
 ---
 
-## 6. Geração do Dataset de Machine Learning (Fase 4 — Etapa 1)
+## 6. Geração do Dataset de Machine Learning (Fase 4 / Fase 5)
 
-Para regerar o dataset de 3.072 observações com horizonte de 60 segundos ($t + 60\text{s}$) através da simulação determinística:
+Para regerar o dataset operacional de 9.216 observações (48 corridas) com horizonte de 60 segundos ($t + 60\text{s}$) através da simulação determinística:
 ```powershell
 java -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" ml.TrafficDatasetGenerator
 ```
@@ -211,7 +241,22 @@ Na Etapa 4, o modelo binário congelado (`data/traffic_model.bin`) opera ativame
 
 ---
 
-## 10. Calendário Operacional e Entregas
+## 10. Avaliação Experimental Comparativa A/B/C/D (Fase 5)
+
+A infraestrutura experimental compara rigorosamente quatro modos de controlo sob condições idênticas de tráfego, sementes e horários de pico:
+- **Modo A (Fixed-Time):** Temporização estática de 20 segundos sem sensores nem comunicação.
+- **Modo B (Actuated Local):** Ajuste local de verde por cruzamento baseado em sensores locais de fila.
+- **Modo C (Multi-Agent Coordination):** Coordenação JADE distribuída com Onda Verde (*Green Wave*) e balanceamento de tráfego.
+- **Modo D (Coordination + Predictive ML):** Coordenação JADE com injeção de alertas antecipatórios de Machine Learning ($\tau = 0.40$).
+
+Para executar a bateria experimental com exportação automática de métricas para `results/experiments/`:
+```powershell
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" experiments.TrafficExperimentRunner
+```
+
+---
+
+## 11. Calendário Operacional e Entregas
 
 * **Entrega Intermédia (30%):** **1 de Novembro** (Apresentação e Demonstração Laboratorial Obrigatória: **2 a 4 de Novembro**).
 * **Entrega Final (70%):** **3 de Janeiro** (Demonstração: 20%, Código-Fonte: 25%, Artigo Científico SCImago Q1/Q2/Q3: 25%).

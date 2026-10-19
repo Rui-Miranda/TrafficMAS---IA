@@ -12,3 +12,4 @@ MTPs-Main-Container.txt
 
 # Ficheiros temporários de validação de testes
 *validation.csv
+results/experiments/test_*/
