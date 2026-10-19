@@ -85,7 +85,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [9/11] A executar suite de métricas e exportação (Fase 5 - Etapa 1)...
+echo [9/12] A executar suite de métricas e exportação (Fase 5 - Etapa 1)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficMetricsTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -95,7 +95,17 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [10/11] A executar suite de validação do SimulationClock (Fase 5 - Checkpoint B)...
+echo [10/12] A executar teste de integração controlada de métricas (Fase 5 - Etapa 1)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.ControlledSimulationIntegrationTest
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Teste de Integração Controlada de Métricas falhou!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
+echo [11/12] A executar suite de validação do SimulationClock (Fase 5 - Checkpoint B)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SimulationClockValidationTest
 
 if %ERRORLEVEL% NEQ 0 (
@@ -105,7 +115,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [11/11] A executar suite de infraestrutura experimental e piloto (Fase 5 - Etapa 2)...
+echo [12/12] A executar suite de infraestrutura experimental e piloto (Fase 5 - Etapa 2)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficExperimentTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -116,6 +126,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo ================================================================================
-echo    TODAS AS 11 SUITES DE TESTES (110 TESTES - FASES 1 A 5) FORAM CONCLUÍDAS!
+echo    TODAS AS 11 SUITES DE TESTES (112 TESTES - FASES 1 A 5) FORAM CONCLUÍDAS!
 echo ================================================================================
 pause
+

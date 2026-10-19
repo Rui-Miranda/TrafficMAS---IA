@@ -67,6 +67,12 @@ public class TrafficExperimentRunner {
     public static final double SIMULATION_DURATION = 600.0;  // 10 minutos simulados
     public static final double WARMUP_DURATION = 60.0;       // 1 minuto de warm-up
 
+    public static final String FINAL_RESULTS_DIR = "results/experiments/final";
+    public static final long[] FINAL_SEEDS = {
+            1001L, 1002L, 1003L, 1004L, 1005L,
+            1006L, 1007L, 1008L, 1009L, 1010L
+    };
+
     public static class ExperimentRunResult {
         public final String runId;
         public final String scenario;
@@ -109,33 +115,54 @@ public class TrafficExperimentRunner {
     }
 
     public static void main(String[] args) {
+        boolean isFinal = false;
+        if (args != null && args.length > 0) {
+            for (String arg : args) {
+                if ("final".equalsIgnoreCase(arg) || "--final".equalsIgnoreCase(arg)) {
+                    isFinal = true;
+                    break;
+                }
+            }
+        }
+
+        String targetDir = isFinal ? FINAL_RESULTS_DIR : RESULTS_DIR;
+        long[] targetSeeds = isFinal ? FINAL_SEEDS : PILOT_SEEDS;
+        int totalExpected = PILOT_MODES.length * PILOT_SCENARIOS.length * targetSeeds.length;
+
         System.out.println("================================================================================");
-        System.out.println("   TRAFFICMAS — PILOTO EXPERIMENTAL COMPARATIVO (FASE 5 - ETAPA 2)");
-        System.out.println("   Configuração: 4 Modos × 4 Cenários × 2 Seeds = 32 Execuções");
-        System.out.println("   Duração: 600s simulados (Warm-up: 60s) | Seeds: [2001, 2002]");
+        if (isFinal) {
+            System.out.println("   TRAFFICMAS — BENCHMARK FINAL COMPARATIVO (FASE 5.2 - 160 EXPERIÊNCIAS)");
+            System.out.println("   Configuração: 4 Modos × 4 Cenários × 10 Seeds = 160 Execuções");
+            System.out.println("   Duração: 600s simulados (Warm-up: 60s) | Seeds: [1001 a 1010]");
+        } else {
+            System.out.println("   TRAFFICMAS — PILOTO EXPERIMENTAL COMPARATIVO (FASE 5 - ETAPA 2)");
+            System.out.println("   Configuração: 4 Modos × 4 Cenários × 2 Seeds = 32 Execuções");
+            System.out.println("   Duração: 600s simulados (Warm-up: 60s) | Seeds: [2001, 2002]");
+        }
+        System.out.println("   Diretório de Exportação: " + targetDir);
         System.out.println("================================================================================");
 
         try {
             TrafficExperimentRunner runner = new TrafficExperimentRunner();
-            List<ExperimentRunResult> results = runner.runPilot();
+            List<ExperimentRunResult> results = isFinal ? runner.runFinalBenchmark() : runner.runPilot();
 
-            System.out.println("\n[EXPORTAÇÃO] A gerar ficheiros tabulares em " + RESULTS_DIR + "...");
-            runner.exportAllResults(results);
+            System.out.println("\n[EXPORTAÇÃO] A gerar ficheiros tabulares finais em " + targetDir + "...");
+            runner.exportAllResults(results, targetDir);
 
             System.out.println("\n================================================================================");
-            System.out.println("   PILOTO EXPERIMENTAL CONCLUÍDO COM 100% DE SUCESSO!");
-            System.out.println("   Total de ensaios válidos: " + results.size() + " / 32");
+            System.out.println(String.format("   BENCHMARK CONCLUÍDO COM 100%% DE SUCESSO! (%d / %d ensaios válidos)", results.size(), totalExpected));
             System.out.println("   Ficheiros gerados:");
-            System.out.println("     1. " + RAW_RUNS_FILE);
-            System.out.println("     2. " + SCENARIO_SUMMARY_FILE);
-            System.out.println("     3. " + MODE_COMPARISON_FILE);
-            System.out.println("     4. " + INTERSECTION_RESULTS_FILE);
-            System.out.println("     5. " + STATISTICAL_ANALYSIS_FILE);
+            System.out.println("     1. " + targetDir + "/raw_runs.csv");
+            System.out.println("     2. " + targetDir + "/scenario_summary.csv");
+            System.out.println("     3. " + targetDir + "/mode_comparison.csv");
+            System.out.println("     4. " + targetDir + "/intersection_results.csv");
+            System.out.println("     5. " + targetDir + "/statistical_analysis.csv");
+            System.out.println("     6. " + targetDir + "/ml_alerts_audit.csv");
             System.out.println("================================================================================");
             System.exit(0);
 
         } catch (Exception e) {
-            System.err.println("FALHA CRÍTICA NO PILOTO: " + e.getMessage());
+            System.err.println("FALHA CRÍTICA NO EXPERIMENTO: " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
         }
@@ -145,14 +172,26 @@ public class TrafficExperimentRunner {
      * Executa o piloto de 32 ensaios experimentais.
      */
     public List<ExperimentRunResult> runPilot() {
-        return runSuite(PILOT_MODES, PILOT_SCENARIOS, PILOT_SEEDS, SIMULATION_DURATION, WARMUP_DURATION);
+        return runSuite(PILOT_MODES, PILOT_SCENARIOS, PILOT_SEEDS, SIMULATION_DURATION, WARMUP_DURATION, RESULTS_DIR);
     }
 
     /**
-     * Executa uma suite parametrizada de ensaios experimentais.
+     * Executa o benchmark final de 160 ensaios experimentais (Fase 5.2).
+     */
+    public List<ExperimentRunResult> runFinalBenchmark() {
+        return runSuite(PILOT_MODES, PILOT_SCENARIOS, FINAL_SEEDS, SIMULATION_DURATION, WARMUP_DURATION, FINAL_RESULTS_DIR);
+    }
+
+    /**
+     * Executa uma suite parametrizada de ensaios experimentais com persistência de lotes.
      */
     public List<ExperimentRunResult> runSuite(String[] modes, String[] scenarios, long[] seeds,
                                             double totalDuration, double warmupDuration) {
+        return runSuite(modes, scenarios, seeds, totalDuration, warmupDuration, null);
+    }
+
+    public List<ExperimentRunResult> runSuite(String[] modes, String[] scenarios, long[] seeds,
+                                            double totalDuration, double warmupDuration, String partialSaveDir) {
         List<ExperimentRunResult> results = new ArrayList<>();
         int totalRuns = modes.length * scenarios.length * seeds.length;
         int currentRun = 0;
@@ -187,6 +226,15 @@ public class TrafficExperimentRunner {
                             s.realDurationSeconds, s.totalCrossings, s.throughputVehiclesPerMinute,
                             s.averageWaitingTimeSeconds, s.averageQueueLength, s.emergencyRequests,
                             s.coordinationCommandsIssued, s.coordinationCommandsApplied, s.mlAlertsEmitted);
+                }
+            }
+            // Salvaguarda parcial por lote de cenário para robustez contra falhas (Checkpoint 4)
+            if (partialSaveDir != null && !partialSaveDir.isEmpty()) {
+                try {
+                    exportAllResults(results, partialSaveDir);
+                    System.out.printf("\n   >>> [LOTE CONCLUÍDO] %d / %d corridas guardadas com sucesso em %s <<<\n", results.size(), totalRuns, partialSaveDir);
+                } catch (Exception e) {
+                    System.err.println("Aviso: Falha ao gravar progresso parcial: " + e.getMessage());
                 }
             }
         }
