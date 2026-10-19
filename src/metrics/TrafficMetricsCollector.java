@@ -26,6 +26,7 @@ public class TrafficMetricsCollector {
 
     // Relógio e Temporização
     private volatile double currentSimTimeSeconds = 0.0;
+    private volatile double measurementStartSimTimeSeconds = 0.0;
     private volatile long realStartTimeMillis = 0L;
     private volatile long realEndTimeMillis = 0L;
 
@@ -98,7 +99,29 @@ public class TrafficMetricsCollector {
         }
     }
 
+    public static class MLAlertRecord {
+        public final String alertId;
+        public final int intersectionIndex;
+        public final double alertSimTime;
+        public final double probability;
+        public final String riskType;
+        public volatile boolean checkedAtHorizon = false;
+        public volatile boolean observedCongestionAtHorizon = false;
+        public volatile int observedQueueAtHorizon = 0;
+        public volatile double observedWaitAtHorizon = 0.0;
+        public volatile double observedSpeedAtHorizon = 0.0;
+
+        public MLAlertRecord(String alertId, int intersectionIndex, double alertSimTime, double probability, String riskType) {
+            this.alertId = alertId;
+            this.intersectionIndex = intersectionIndex;
+            this.alertSimTime = alertSimTime;
+            this.probability = probability;
+            this.riskType = riskType;
+        }
+    }
+
     private final AtomicInteger mlAlertsEmitted = new AtomicInteger(0);
+    private final List<MLAlertRecord> mlAlertRecords = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, CoordinationEventRecord> coordinationRecords = new ConcurrentHashMap<>();
     private final AtomicInteger coordinationIssuedCount = new AtomicInteger(0);
     private final AtomicInteger coordinationAcceptedCount = new AtomicInteger(0);
@@ -165,8 +188,16 @@ public class TrafficMetricsCollector {
         return Math.max(0.001, (end - realStartTimeMillis) / 1000.0);
     }
 
+    public synchronized void setMeasurementStartSimTime(double startSimTime) {
+        this.measurementStartSimTimeSeconds = Math.max(0.0, startSimTime);
+    }
+
+    public double getMeasurementStartSimTime() {
+        return measurementStartSimTimeSeconds;
+    }
+
     public double getSimulatedDurationSeconds() {
-        return Math.max(0.001, currentSimTimeSeconds);
+        return Math.max(0.001, currentSimTimeSeconds - measurementStartSimTimeSeconds);
     }
 
     /* =========================================================================
@@ -438,6 +469,11 @@ public class TrafficMetricsCollector {
 
     public void recordMLAlert(String alertId, int intersectionIndex, double probability, String riskType) {
         mlAlertsEmitted.incrementAndGet();
+        mlAlertRecords.add(new MLAlertRecord(alertId, intersectionIndex, currentSimTimeSeconds, probability, riskType));
+    }
+
+    public List<MLAlertRecord> getMLAlertRecords() {
+        return new ArrayList<>(mlAlertRecords);
     }
 
     public void recordCoordinationIssued(String cmdId, int intersectionIndex, String policyType, long plannedDurationMs) {

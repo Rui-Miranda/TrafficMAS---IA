@@ -199,6 +199,19 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
     }
 
     /**
+     * Reinicializa o estado de espera das viaturas em circulação no fim do período de aquecimento (warm-up).
+     * Zera o acumulador de esperas anteriores a warmupTime e ajusta o início de imobilização atual para warmupTime.
+     */
+    public synchronized void resetWarmupVehicleStates(double warmupTime) {
+        for (SimVehicle v : vehicles) {
+            v.totalWaitSeconds = 0.0;
+            if (v.currentStopStartSeconds >= 0) {
+                v.currentStopStartSeconds = warmupTime;
+            }
+        }
+    }
+
+    /**
      * Avança a simulação um determinado número de segundos (em passos discretos de 1/30 s = 33.3ms).
      */
     public void advanceSeconds(double durationSeconds) {

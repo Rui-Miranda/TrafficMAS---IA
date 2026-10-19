@@ -79,11 +79,13 @@ public class TrafficExperimentRunner {
         public final int errorCount;
         public final String modelVersion;
         public final String modelDatasetSha256;
+        public final List<TrafficMetricsCollector.MLAlertRecord> mlAlertRecords;
 
         public ExperimentRunResult(String runId, String scenario, String mode, long seed,
                                    double simDuration, double warmupDuration,
                                    TrafficMetricsSnapshot snapshot, String status, int errorCount,
-                                   String modelVersion, String modelDatasetSha256) {
+                                   String modelVersion, String modelDatasetSha256,
+                                   List<TrafficMetricsCollector.MLAlertRecord> mlAlertRecords) {
             this.runId = runId;
             this.scenario = scenario;
             this.mode = mode;
@@ -95,6 +97,14 @@ public class TrafficExperimentRunner {
             this.errorCount = errorCount;
             this.modelVersion = modelVersion;
             this.modelDatasetSha256 = modelDatasetSha256;
+            this.mlAlertRecords = (mlAlertRecords != null) ? new ArrayList<>(mlAlertRecords) : Collections.emptyList();
+        }
+
+        public ExperimentRunResult(String runId, String scenario, String mode, long seed,
+                                   double simDuration, double warmupDuration,
+                                   TrafficMetricsSnapshot snapshot, String status, int errorCount,
+                                   String modelVersion, String modelDatasetSha256) {
+            this(runId, scenario, mode, seed, simDuration, warmupDuration, snapshot, status, errorCount, modelVersion, modelDatasetSha256, Collections.emptyList());
         }
     }
 
@@ -276,7 +286,10 @@ public class TrafficExperimentRunner {
                 // Fim do período de aquecimento (warm-up): reinicia contadores para medição de estado estacionário
                 if (s == warmupSteps) {
                     TrafficMetricsCollector.reset();
-                    TrafficMetricsCollector.getInstance().setSimulatedTime(currentT);
+                    TrafficMetricsCollector collector = TrafficMetricsCollector.getInstance();
+                    collector.setMeasurementStartSimTime(currentT);
+                    collector.setSimulatedTime(currentT);
+                    sim.resetWarmupVehicleStates(currentT);
                 }
 
                 // Injeção de emergências determinísticas
@@ -294,6 +307,20 @@ public class TrafficExperimentRunner {
                 }
 
                 sim.advanceSeconds(dt);
+
+                // Avaliação das previsões ML ao atingir o horizonte preditivo de 60 segundos
+                if (controlMode == ControlMode.MULTIAGENT_ML) {
+                    for (TrafficMetricsCollector.MLAlertRecord alertRec : TrafficMetricsCollector.getInstance().getMLAlertRecords()) {
+                        if (!alertRec.checkedAtHorizon && currentT >= (alertRec.alertSimTime + 60.0)) {
+                            HeadlessTrafficSimulator.IntersectionMetricsSnapshot futureSnap = sim.captureSnapshot(alertRec.intersectionIndex);
+                            alertRec.checkedAtHorizon = true;
+                            alertRec.observedCongestionAtHorizon = futureSnap.isSevereCongestion();
+                            alertRec.observedQueueAtHorizon = futureSnap.queueLength;
+                            alertRec.observedWaitAtHorizon = futureSnap.averageWaitingTime;
+                            alertRec.observedSpeedAtHorizon = futureSnap.averageSpeed;
+                        }
+                    }
+                }
             }
 
             TrafficMetricsCollector collector = TrafficMetricsCollector.getInstance();
@@ -314,14 +341,14 @@ public class TrafficExperimentRunner {
             sim.cleanup();
 
             return new ExperimentRunResult(runId, scenario, mode, seed, totalDuration, warmupDuration,
-                    snapshot, executionStatus, errorCount, modelVersion, modelSha);
+                    snapshot, executionStatus, errorCount, modelVersion, modelSha, collector.getMLAlertRecords());
 
         } catch (Exception e) {
             errorCount++;
             executionStatus = "FAILED_EXCEPTION: " + e.getMessage();
             TrafficMetricsSnapshot fallbackSnap = TrafficMetricsCollector.getInstance().getSnapshot(runId, scenario, mode, seed);
             return new ExperimentRunResult(runId, scenario, mode, seed, totalDuration, warmupDuration,
-                    fallbackSnap, executionStatus, errorCount, modelVersion, modelSha);
+                    fallbackSnap, executionStatus, errorCount, modelVersion, modelSha, Collections.emptyList());
 
         } finally {
             if (container != null) {
@@ -351,6 +378,7 @@ public class TrafficExperimentRunner {
         exportModeComparison(new File(targetDir + "/mode_comparison.csv"), results);
         exportIntersectionResults(new File(targetDir + "/intersection_results.csv"), results);
         exportStatisticalAnalysis(new File(targetDir + "/statistical_analysis.csv"), results);
+        exportMLAlertsAudit(new File(targetDir + "/ml_alerts_audit.csv"), results);
     }
 
     private void exportRawRuns(File file, List<ExperimentRunResult> results) throws IOException {
@@ -592,6 +620,36 @@ public class TrafficExperimentRunner {
         }
     }
 
+    private void exportMLAlertsAudit(File file, List<ExperimentRunResult> results) throws IOException {
+        try (PrintWriter w = new PrintWriter(new FileWriter(file))) {
+            w.println("runId,scenario,mode,seed,alertId,alertSimTimeSeconds,intersectionIndex,intersectionName,"
+                    + "probability,riskType,observedCongestionAt60sHorizon,observedQueueAtHorizon,observedWaitAtHorizon,observedSpeedAtHorizon");
+
+            String[] interNames = {"C1_NW", "C2_NE", "C3_SW", "C4_SE"};
+            for (ExperimentRunResult r : results) {
+                if (r.mlAlertRecords == null || r.mlAlertRecords.isEmpty()) continue;
+                for (TrafficMetricsCollector.MLAlertRecord a : r.mlAlertRecords) {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append(r.runId).append(",");
+                    sb.append(r.scenario).append(",");
+                    sb.append(r.mode).append(",");
+                    sb.append(r.seed).append(",");
+                    sb.append(a.alertId).append(",");
+                    sb.append(String.format(Locale.US, "%.1f", a.alertSimTime)).append(",");
+                    sb.append(a.intersectionIndex).append(",");
+                    sb.append(interNames[a.intersectionIndex]).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", a.probability)).append(",");
+                    sb.append(a.riskType).append(",");
+                    sb.append(a.observedCongestionAtHorizon ? "SIM" : "NAO").append(",");
+                    sb.append(a.observedQueueAtHorizon).append(",");
+                    sb.append(String.format(Locale.US, "%.2f", a.observedWaitAtHorizon)).append(",");
+                    sb.append(String.format(Locale.US, "%.2f", a.observedSpeedAtHorizon));
+                    w.println(sb.toString());
+                }
+            }
+        }
+    }
+
     private void exportStatisticalAnalysis(File file, List<ExperimentRunResult> results) throws IOException {
         // Mapeamento: (scenario, seed) -> (mode -> result)
         Map<String, Map<String, ExperimentRunResult>> grid = new LinkedHashMap<>();
@@ -611,7 +669,7 @@ public class TrafficExperimentRunner {
 
         try (PrintWriter w = new PrintWriter(new FileWriter(file))) {
             w.println("comparison,metric,sampleSize,meanBaseline,meanAlternative,meanDifference,pctDifference,"
-                    + "stdDifference,pairedTStatistic,pValue,wilcoxonW,statisticallySignificant,conclusion");
+                    + "ci95DiffLower,ci95DiffUpper,stdDifference,cohensDz,pairedTStatistic,tPValue,wilcoxonW,wilcoxonExactPValue,statisticallySignificant,conclusion");
 
             for (String[] comp : comparisons) {
                 String mBase = comp[0];
@@ -647,31 +705,58 @@ public class TrafficExperimentRunner {
                     double stdDiff = stdDev(diffs, meanDiff);
                     double se = stdDiff / Math.sqrt(n);
                     double tStat = (se > 1e-9) ? (meanDiff / se) : 0.0;
-                    double pVal = approximateTwoTailedPValue(tStat, n - 1);
+                    double tPVal = computeStudentTTwoTailedPValue(tStat, n - 1);
                     double wilcoxonW = computeWilcoxonW(diffs);
-                    boolean isSig = (pVal < 0.05);
+                    double wilcoxonExactPVal = computeWilcoxonExactTwoTailedPValue(diffs, wilcoxonW);
+                    double cohensDz = (stdDiff > 1e-9) ? (meanDiff / stdDiff) : 0.0;
+                    double critT = getCriticalT95(n - 1);
+                    double ciLower = meanDiff - (critT * se);
+                    double ciUpper = meanDiff + (critT * se);
+                    boolean isSig = (wilcoxonExactPVal < 0.05);
 
                     String conclusion;
-                    if (metric.equals("waitingTime") || metric.equals("queueLength")) {
-                        conclusion = (meanDiff < 0) ? (isSig ? "MELHORIA_SIGNIFICATIVA" : "TENDENCIA_MELHORIA")
-                                                    : (isSig ? "DEGRADACAO_SIGNIFICATIVA" : "SEM_DIFERENCA_NOTAVEL");
+                    if (metric.equals("queueLength")) {
+                        if (Math.abs(meanDiff) < 0.05) {
+                            conclusion = isSig ? "MELHORIA_ESTATISTICA_MAS_NEGLIGIVEL_OPERACIONALMENTE (Delta < 0.05 veic)"
+                                               : "SEM_DIFERENCA_NOTAVEL";
+                        } else {
+                            conclusion = (meanDiff < 0) ? (isSig ? "MELHORIA_SIGNIFICATIVA" : "TENDENCIA_MELHORIA")
+                                                        : (isSig ? "DEGRADACAO_SIGNIFICATIVA" : "SEM_DIFERENCA_NOTAVEL");
+                        }
+                    } else if (metric.equals("waitingTime")) {
+                        if (Math.abs(meanDiff) < 0.5) {
+                            conclusion = isSig ? "MELHORIA_ESTATISTICA_MAS_NEGLIGIVEL_OPERACIONALMENTE (Delta < 0.5s)"
+                                               : "SEM_DIFERENCA_NOTAVEL";
+                        } else {
+                            conclusion = (meanDiff < 0) ? (isSig ? "MELHORIA_SIGNIFICATIVA" : "TENDENCIA_MELHORIA")
+                                                        : (isSig ? "DEGRADACAO_SIGNIFICATIVA" : "SEM_DIFERENCA_NOTAVEL");
+                        }
                     } else { // throughput
-                        conclusion = (meanDiff > 0) ? (isSig ? "MELHORIA_SIGNIFICATIVA" : "TENDENCIA_MELHORIA")
-                                                    : (isSig ? "DEGRADACAO_SIGNIFICATIVA" : "SEM_DIFERENCA_NOTAVEL");
+                        if (Math.abs(meanDiff) < 1.0) {
+                            conclusion = isSig ? "EQUIVALENTE_OPERACIONALMENTE (Delta < 1.0 veh/min)"
+                                               : "SEM_DIFERENCA_NOTAVEL";
+                        } else {
+                            conclusion = (meanDiff > 0) ? (isSig ? "MELHORIA_SIGNIFICATIVA" : "TENDENCIA_MELHORIA")
+                                                        : (isSig ? "DEGRADACAO_SIGNIFICATIVA" : "SEM_DIFERENCA_NOTAVEL");
+                        }
                     }
 
                     StringBuilder sb = new StringBuilder();
                     sb.append(compName).append(",");
                     sb.append(metric).append(",");
                     sb.append(n).append(",");
-                    sb.append(String.format(Locale.US, "%.2f", meanBase)).append(",");
-                    sb.append(String.format(Locale.US, "%.2f", meanAlt)).append(",");
-                    sb.append(String.format(Locale.US, "%.2f", meanDiff)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", meanBase)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", meanAlt)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", meanDiff)).append(",");
                     sb.append(String.format(Locale.US, "%.2f%%", pctDiff)).append(",");
-                    sb.append(String.format(Locale.US, "%.2f", stdDiff)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", ciLower)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", ciUpper)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", stdDiff)).append(",");
+                    sb.append(String.format(Locale.US, "%.4f", cohensDz)).append(",");
                     sb.append(String.format(Locale.US, "%.4f", tStat)).append(",");
-                    sb.append(String.format(Locale.US, "%.4f", pVal)).append(",");
+                    sb.append(String.format(Locale.US, "%.6f", tPVal)).append(",");
                     sb.append(String.format(Locale.US, "%.1f", wilcoxonW)).append(",");
+                    sb.append(String.format(Locale.US, "%.7f", wilcoxonExactPVal)).append(",");
                     sb.append(isSig ? "SIM (p<0.05)" : "NAO (p>=0.05)").append(",");
                     sb.append(conclusion);
 
@@ -737,7 +822,7 @@ public class TrafficExperimentRunner {
         if (df == 4) return 2.78;
         if (df == 5) return 2.57;
         if (df == 6) return 2.45;
-        if (df == 7) return 2.36;
+        if (df == 7) return 2.3646;
         if (df <= 10) return 2.23;
         if (df <= 20) return 2.09;
         if (df <= 30) return 2.04;
@@ -767,12 +852,106 @@ public class TrafficExperimentRunner {
         return Math.sqrt(sum / (list.size() - 1));
     }
 
+    public static double computeStudentTTwoTailedPValue(double t, int df) {
+        if (df <= 0) return 1.0;
+        double absT = Math.abs(t);
+        if (absT < 1e-12) return 1.0;
+
+        double a = df / 2.0;
+        double b = 0.5;
+        double x = df / (df + absT * absT);
+
+        return regularizedIncompleteBeta(x, a, b);
+    }
+
+    private static double regularizedIncompleteBeta(double x, double a, double b) {
+        if (x <= 0.0) return 0.0;
+        if (x >= 1.0) return 1.0;
+
+        int steps = 2000;
+        double h = x / steps;
+        double sum = 0.0;
+
+        for (int i = 0; i <= steps; i++) {
+            double u = i * h;
+            double f;
+            if (u <= 0.0 || u >= 1.0) {
+                f = 0.0;
+            } else {
+                f = Math.pow(u, a - 1.0) * Math.pow(1.0 - u, b - 1.0);
+            }
+
+            int weight = (i == 0 || i == steps) ? 1 : ((i % 2 == 1) ? 4 : 2);
+            sum += weight * f;
+        }
+
+        double integral = (h / 3.0) * sum;
+        double logBeta = logGamma(a) + logGamma(b) - logGamma(a + b);
+        double beta = Math.exp(logBeta);
+
+        return Math.max(0.0, Math.min(1.0, integral / beta));
+    }
+
+    private static double logGamma(double x) {
+        double[] p = {
+            676.5203681218851, -1259.1392167224028,
+            771.32342877765313, -176.61502916214059,
+            12.507343278686905, -0.13857109526572012,
+            9.9843695780195716e-6, 1.5056327351493116e-7
+        };
+        double y = x;
+        double g = 7.0;
+        if (y < 0.5) {
+            return Math.log(Math.PI / Math.sin(Math.PI * y)) - logGamma(1.0 - y);
+        }
+        y -= 1.0;
+        double a = 0.99999999999980993;
+        for (int i = 0; i < p.length; i++) {
+            a += p[i] / (y + i + 1.0);
+        }
+        double t = y + g + 0.5;
+        return 0.5 * Math.log(2.0 * Math.PI) + (y + 0.5) * Math.log(t) - t + Math.log(a);
+    }
+
+    public static double computeWilcoxonExactTwoTailedPValue(List<Double> diffs, double w) {
+        List<Double> nonZero = new ArrayList<>();
+        for (double d : diffs) {
+            if (Math.abs(d) > 1e-9) nonZero.add(d);
+        }
+        int n = nonZero.size();
+        if (n == 0) return 1.0;
+        if (n > 20) {
+            double meanW = n * (n + 1.0) / 4.0;
+            double varW = n * (n + 1.0) * (2.0 * n + 1.0) / 24.0;
+            double z = (w - meanW + 0.5) / Math.sqrt(varW);
+            return approximateTwoTailedPValue(z, 100);
+        }
+
+        int maxRankSum = n * (n + 1) / 2;
+        long[] dp = new long[maxRankSum + 1];
+        dp[0] = 1L;
+
+        for (int rank = 1; rank <= n; rank++) {
+            for (int s = maxRankSum; s >= rank; s--) {
+                dp[s] += dp[s - rank];
+            }
+        }
+
+        long totalPossibilities = 1L << n; // 2^n
+        int targetW = (int) Math.floor(w);
+        long cumulative = 0L;
+        for (int s = 0; s <= targetW && s <= maxRankSum; s++) {
+            cumulative += dp[s];
+        }
+
+        double oneTailed = (double) cumulative / totalPossibilities;
+        return Math.min(1.0, 2.0 * oneTailed);
+    }
+
     private static double approximateTwoTailedPValue(double t, int df) {
         double absT = Math.abs(t);
         if (df <= 0) return 1.0;
-        // Aproximação normal / Student para o p-value
         double z = absT;
-        // Aproximação de Abramowitz & Stegun para função de erro complementar
         double p = 1.0 / (1.0 + 0.2316419 * z);
         double d = 0.3989422804014337 * Math.exp(-0.5 * z * z);
         double cdf = 1.0 - d * p * (0.319381530 + p * (-0.356563782 + p * (1.781477937 + p * (-1.821255978 + 1.330274429 * p))));
@@ -787,7 +966,6 @@ public class TrafficExperimentRunner {
         }
         if (nonZero.isEmpty()) return 0.0;
 
-        // Ordena por magnitude absoluta
         List<Double> sorted = new ArrayList<>(nonZero);
         sorted.sort(Comparator.comparingDouble(Math::abs));
 

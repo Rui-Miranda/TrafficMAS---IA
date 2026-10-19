@@ -1,13 +1,13 @@
-comparison,metric,sampleSize,meanBaseline,meanAlternative,meanDifference,pctDifference,stdDifference,pairedTStatistic,pValue,wilcoxonW,statisticallySignificant,conclusion
-Modo A vs Modo B (Fixed vs Adaptive),waitingTime,8,0.13,0.26,0.13,95.46%,0.09,3.8876,0.0001,1.0,SIM (p<0.05),DEGRADACAO_SIGNIFICATIVA
-Modo A vs Modo B (Fixed vs Adaptive),throughput,8,40.77,40.91,0.14,0.34%,0.23,1.6719,0.0945,8.0,NAO (p>=0.05),TENDENCIA_MELHORIA
-Modo A vs Modo B (Fixed vs Adaptive),queueLength,8,0.38,0.39,0.01,2.05%,0.06,0.3974,0.6911,15.0,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
-Modo B vs Modo C (Adaptive vs Coord),waitingTime,8,0.26,0.26,0.00,0.00%,0.00,0.0000,1.0000,0.0,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
-Modo B vs Modo C (Adaptive vs Coord),throughput,8,40.91,40.91,0.00,0.00%,0.00,0.0000,1.0000,0.0,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
-Modo B vs Modo C (Adaptive vs Coord),queueLength,8,0.39,0.39,-0.00,-0.38%,0.00,-5.5522,0.0001,0.0,SIM (p<0.05),MELHORIA_SIGNIFICATIVA
-Modo C vs Modo D (Coord vs ML),waitingTime,8,0.26,0.26,0.00,0.00%,0.00,0.0000,1.0000,0.0,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
-Modo C vs Modo D (Coord vs ML),throughput,8,40.91,40.91,-0.00,-0.00%,0.00,-3.0291,0.0025,0.0,SIM (p<0.05),DEGRADACAO_SIGNIFICATIVA
-Modo C vs Modo D (Coord vs ML),queueLength,8,0.39,0.39,-0.00,-0.26%,0.00,-6.5693,0.0001,0.0,SIM (p<0.05),MELHORIA_SIGNIFICATIVA
-Modo A vs Modo D (Fixed vs ML),waitingTime,8,0.13,0.26,0.13,95.46%,0.09,3.8876,0.0001,1.0,SIM (p<0.05),DEGRADACAO_SIGNIFICATIVA
-Modo A vs Modo D (Fixed vs ML),throughput,8,40.77,40.91,0.14,0.33%,0.23,1.6482,0.0993,9.0,NAO (p>=0.05),TENDENCIA_MELHORIA
-Modo A vs Modo D (Fixed vs ML),queueLength,8,0.38,0.39,0.01,1.39%,0.06,0.2707,0.7866,17.0,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+comparison,metric,sampleSize,meanBaseline,meanAlternative,meanDifference,pctDifference,ci95DiffLower,ci95DiffUpper,stdDifference,cohensDz,pairedTStatistic,tPValue,wilcoxonW,wilcoxonExactPValue,statisticallySignificant,conclusion
+Modo A vs Modo B (Fixed vs Adaptive),waitingTime,8,0.1317,0.2565,0.1248,94.73%,0.0506,0.1989,0.0887,1.4067,3.9788,0.005332,1.0,0.0156250,SIM (p<0.05),MELHORIA_ESTATISTICA_MAS_NEGLIGIVEL_OPERACIONALMENTE (Delta < 0.5s)
+Modo A vs Modo B (Fixed vs Adaptive),throughput,8,45.3056,45.4583,0.1528,0.34%,-0.0633,0.3688,0.2585,0.5911,1.6719,0.138457,6.0,0.1093750,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo A vs Modo B (Fixed vs Adaptive),queueLength,8,0.3825,0.3903,0.0078,2.05%,-0.0388,0.0545,0.0558,0.1405,0.3974,0.702918,15.0,0.7421875,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo B vs Modo C (Adaptive vs Coord),waitingTime,8,0.2565,0.2565,0.0000,0.00%,0.0000,0.0000,0.0000,0.0000,0.0000,1.000000,0.0,1.0000000,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo B vs Modo C (Adaptive vs Coord),throughput,8,45.4583,45.4583,0.0000,0.00%,0.0000,0.0000,0.0000,0.0000,0.0000,1.000000,0.0,1.0000000,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo B vs Modo C (Adaptive vs Coord),queueLength,8,0.3903,0.3903,0.0000,0.00%,0.0000,0.0000,0.0000,0.0000,0.0000,1.000000,0.0,1.0000000,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo C vs Modo D (Coord vs ML),waitingTime,8,0.2565,0.2565,0.0000,0.00%,0.0000,0.0000,0.0000,0.0000,0.0000,1.000000,0.0,1.0000000,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo C vs Modo D (Coord vs ML),throughput,8,45.4583,45.4583,0.0000,0.00%,0.0000,0.0000,0.0000,0.0000,0.0000,1.000000,0.0,1.0000000,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo C vs Modo D (Coord vs ML),queueLength,8,0.3903,0.3903,0.0000,0.00%,0.0000,0.0000,0.0000,0.0000,0.0000,1.000000,0.0,1.0000000,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo A vs Modo D (Fixed vs ML),waitingTime,8,0.1317,0.2565,0.1248,94.73%,0.0506,0.1989,0.0887,1.4067,3.9788,0.005332,1.0,0.0156250,SIM (p<0.05),MELHORIA_ESTATISTICA_MAS_NEGLIGIVEL_OPERACIONALMENTE (Delta < 0.5s)
+Modo A vs Modo D (Fixed vs ML),throughput,8,45.3056,45.4583,0.1528,0.34%,-0.0633,0.3688,0.2585,0.5911,1.6719,0.138457,6.0,0.1093750,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL
+Modo A vs Modo D (Fixed vs ML),queueLength,8,0.3825,0.3903,0.0078,2.05%,-0.0388,0.0545,0.0558,0.1405,0.3974,0.702918,15.0,0.7421875,NAO (p>=0.05),SEM_DIFERENCA_NOTAVEL

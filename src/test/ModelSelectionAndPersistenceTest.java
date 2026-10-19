@@ -44,6 +44,7 @@ public class ModelSelectionAndPersistenceTest {
             test10_DecisionThresholdRobustness();
             test11_ModelReproducibility();
             test12_TestMetricsCalculationCorrectness();
+            test13_ConfusionMatrixMetricsDiscrepancyPrevention();
 
             System.out.println("\n--------------------------------------------------------------------------------");
             System.out.printf("RESULTADO GLOBAL ETAPA 3: %d PASSOU | %d FALHOU\n", testsPassed, testsFailed);
@@ -103,6 +104,9 @@ public class ModelSelectionAndPersistenceTest {
         Set<String> trainRuns = new HashSet<>();
         Set<String> valRuns = new HashSet<>();
         Set<String> testRuns = new HashSet<>();
+        Map<String, Integer> runCounts = new HashMap<>();
+
+        int trainRows = 0, valRows = 0, testRows = 0;
 
         try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(FinalModelEvaluator.DATASET_CSV_PATH))) {
             br.readLine();
@@ -111,15 +115,34 @@ public class ModelSelectionAndPersistenceTest {
                 String[] p = line.split(",");
                 String runId = p[0].trim();
                 String split = p[2].trim();
-                if (split.equals("TRAIN")) trainRuns.add(runId);
-                else if (split.equals("VAL")) valRuns.add(runId);
-                else if (split.equals("TEST")) testRuns.add(runId);
+                runCounts.put(runId, runCounts.getOrDefault(runId, 0) + 1);
+
+                if (split.equals("TRAIN")) {
+                    trainRuns.add(runId);
+                    trainRows++;
+                } else if (split.equals("VAL")) {
+                    valRuns.add(runId);
+                    valRows++;
+                } else if (split.equals("TEST")) {
+                    testRuns.add(runId);
+                    testRows++;
+                }
             }
         }
 
         boolean disjointVal = Collections.disjoint(trainRuns, valRuns);
         boolean disjointTest = Collections.disjoint(trainRuns, testRuns) && Collections.disjoint(valRuns, testRuns);
-        assertTrue("3. Isolamento Estrito TRAIN/VAL/TEST (Zero Sobreposição)", disjointVal && disjointTest, "Runs partilhadas entre splits");
+        boolean countsOk = (trainRuns.size() == 32 && valRuns.size() == 8 && testRuns.size() == 8);
+        boolean rowsOk = (trainRows == 6144 && valRows == 1536 && testRows == 1536);
+
+        boolean allRuns192 = true;
+        for (int c : runCounts.values()) {
+            if (c != 192) { allRuns192 = false; break; }
+        }
+
+        assertTrue("3. Isolamento Estrito TRAIN/VAL/TEST (Particionamento por RunId, Zero Fuga)",
+                disjointVal && disjointTest && countsOk && rowsOk && allRuns192,
+                "Fuga de informação detetada ou contagens incorretas: train=" + trainRows + ", val=" + valRows + ", test=" + testRows);
     }
 
     // 4. Seleção do modelo por VAL
@@ -285,5 +308,44 @@ public class ModelSelectionAndPersistenceTest {
         boolean accOk = Math.abs(m.accuracy - ((double)(m.truePositives + m.trueNegatives) / test.size())) < 1e-9;
 
         assertTrue("12. Integridade Matemática das Métricas em TEST", cmSum && accOk, "Matriz de métricas inconsistente");
+    }
+
+    // 13. Prevenção de Divergência entre Métricas Publicadas e Matriz de Confusão em TEST
+    private static void test13_ConfusionMatrixMetricsDiscrepancyPrevention() throws Exception {
+        TrafficModelBundle bundle = ModelPersistenceManager.loadModel("data/traffic_model.bin");
+        DatasetLoader.SplitData test = DatasetLoader.loadSplit(FinalModelEvaluator.DATASET_CSV_PATH, "TEST");
+
+        int tn = 0, fp = 0, fn = 0, tp = 0;
+        for (int i = 0; i < test.size(); i++) {
+            double prob = bundle.predictProbability(test.X[i]);
+            int pred = (prob >= bundle.getDecisionThreshold()) ? 1 : 0;
+            int actual = test.y[i];
+
+            if (actual == 0 && pred == 0) tn++;
+            else if (actual == 0 && pred == 1) fp++;
+            else if (actual == 1 && pred == 0) fn++;
+            else if (actual == 1 && pred == 1) tp++;
+        }
+
+        int total = tn + fp + fn + tp;
+        double acc = (double)(tp + tn) / total;
+        double prec = (tp + fp > 0) ? (double) tp / (tp + fp) : 0.0;
+        double rec = (tp + fn > 0) ? (double) tp / (tp + fn) : 0.0;
+        double spec = (tn + fp > 0) ? (double) tn / (tn + fp) : 0.0;
+        double f1 = (prec + rec > 0) ? (2.0 * prec * rec) / (prec + rec) : 0.0;
+
+        // Valida contagens exatas da partição de teste (N=1536)
+        boolean totalOk = (total == 1536);
+        boolean cmCountsOk = (tn == 1147 && fp == 37 && fn == 257 && tp == 95);
+        boolean accOk = Math.abs(acc - 0.80859375) < 1e-6;
+        boolean precOk = Math.abs(prec - 0.71969697) < 1e-6;
+        boolean recOk = Math.abs(rec - 0.26988636) < 1e-6;
+        boolean specOk = Math.abs(spec - 0.96875) < 1e-6;
+        boolean f1Ok = Math.abs(f1 - 0.39256198) < 1e-6;
+
+        boolean allConsistent = totalOk && cmCountsOk && accOk && precOk && recOk && specOk && f1Ok;
+        assertTrue("13. Prevenção de Divergência entre Métricas e Matriz de Confusão em TEST",
+                allConsistent,
+                String.format("Divergência detetada: TN=%d, FP=%d, FN=%d, TP=%d, Sum=%d (Esperado N=1536)", tn, fp, fn, tp, total));
     }
 }
