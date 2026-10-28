@@ -1,6 +1,8 @@
 package agents;
 
 import environment.CitySimulationGUI;
+import environment.FleetLifecycleManager;
+import environment.NetworkTopologyConfig;
 import environment.TrafficEnvironment;
 import jade.core.AID;
 import jade.core.Agent;
@@ -12,35 +14,32 @@ import jade.domain.FIPAAgentManagement.Property;
 import jade.domain.FIPAAgentManagement.ServiceDescription;
 import jade.domain.FIPAException;
 import jade.lang.acl.ACLMessage;
+import metrics.TrafficMetricsCollector;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Agente Veículo Regular Autónomo (Feature 3 - Vehicle Agents).
+ * Agente Veículo Regular Autónomo (Feature 3 / Fase 6.1 - Vehicle Agents).
  *
- * Simula uma viatura convencional em circulação na malha urbana:
- * - Perceciona dinamicamente o cruzamento mais próximo através dos sensores do simulador.
- * - Resolve o semáforo competente via Directory Facilitator (DF) do JADE,
- *   em vez de utilizar nomes hardcoded.
+ * Simula uma viatura convencional em circulação na malha urbana (2×2 ou 3×3):
+ * - Perceciona dinamicamente o cruzamento mais próximo e o eixo atual (suportando viragens A*).
+ * - Resolve o semáforo competente via Directory Facilitator (DF) do JADE com cache local.
  * - Monitoriza o tempo de espera acumulado em filas de retenção.
  * - Envia mensagens FIPA-ACL (REQUEST) quando o tempo de imobilização ultrapassa o limiar de tolerância.
- * - Regista a sua presença no DF para descoberta automática por outros agentes.
- *
- * Correções da Fase 2:
- * 1. Eliminação do semáforo hardcoded — agora resolvido via DF + perceção do cruzamento.
- * 2. Suporte completo para os 4 cruzamentos da malha urbana.
- * 3. Deteção do cruzamento mais próximo com base na posição real no simulador.
- * 4. Anti-debouncing: não reenvia se já enviou REQUEST para o mesmo cruzamento recentemente.
+ * - Regista-se no {@link FleetLifecycleManager} e liberta todos os recursos físicos/visuais em {@code takeDown()}.
  *
  * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya
  */
 public class VehicleAgent extends Agent {
 
-    /** Eixo viário de circulação: "NS" (Norte-Sul) ou "EW" (Este-Oeste) */
+    /** Eixo viário inicial de circulação: "NS" (Norte-Sul) ou "EW" (Este-Oeste) */
     private String road;
 
-    /** Direção visual de circulação (0: N->S, 1: S->N, 2: W->E, 3: E->W) */
+    /** Direção visual inicial de circulação (0: N->S, 1: S->N, 2: W->E, 3: E->W) */
     private int visualDirection;
 
-    /** Eixo numérico para pesquisa no DF (0=NS, 1=EW) */
+    /** Eixo numérico atual para pesquisa no DF (0=NS, 1=EW) */
     private int axis;
 
     /** Limiar de espera acima do qual o veículo emite REQUEST (em segundos) */
@@ -49,39 +48,48 @@ public class VehicleAgent extends Agent {
     /** Intervalo mínimo entre envios de REQUEST ao mesmo cruzamento (ms) */
     private static final long INTERVALO_MINIMO_REQUEST_MS = 6000;
 
-    /** Nomes canónicos dos cruzamentos, indexados de 0 a 3 */
-    private static final String[] CROSSING_NAMES = {"C1_NW", "C2_NE", "C3_SW", "C4_SE"};
+    /** Milissegundo do último REQUEST enviado, indexado por cruzamento (até 9 cruzamentos em 3×3) */
+    private final long[] lastRequestPerIntersection = new long[9];
 
-    /** Milissegundo do último REQUEST enviado, indexado por cruzamento */
-    private final long[] lastRequestPerIntersection = new long[4];
-
-    /** Índice do último cruzamento para o qual foi enviado um pedido */
-    private int lastTargetIntersection = -1;
+    /** Cache estática de resolução DF para reduzir sobrecarga com 50 veículos */
+    private static final Map<String, String> dfSemaphoreCache = new ConcurrentHashMap<>();
 
     @Override
     protected void setup() {
         Object[] args = getArguments();
-        if (args != null && args.length > 0) {
-            this.road = (String) args[0];
+        if (args != null && args.length > 0 && args[0] != null) {
+            this.road = args[0].toString();
         } else {
             this.road = "NS";
         }
 
-        // Determinação do eixo e direção visual a partir do parâmetro "road"
         this.axis = road.equalsIgnoreCase("NS") ? 0 : 1;
-        this.visualDirection = (axis == 0) ? 0 : 2; // 0: N->S, 2: W->E por omissão
+        this.visualDirection = (axis == 0) ? 0 : 2;
 
-        // 1. Registo no Directory Facilitator
+        if (args != null && args.length > 1 && args[1] instanceof Integer) {
+            this.visualDirection = (Integer) args[1];
+            this.axis = (this.visualDirection == 0 || this.visualDirection == 1) ? 0 : 1;
+        }
+
+        // 1. Registo no Gestor de Ciclo de Vida da Frota (Fase 6.1)
+        FleetLifecycleManager.getInstance().registerLiveJadeAgent(getLocalName(), "VehicleAgent");
+
+        // 2. Registo no Directory Facilitator
         registarNoDF();
 
-        // 2. Integração visual na cidade com cor distintiva de viatura regular
-        java.awt.Color carColor = new java.awt.Color(30, 160, 230);
-        CitySimulationGUI.getInstance().addVehicle(getLocalName(), visualDirection, carColor);
+        // 3. Integração visual na cidade (se ainda não foi inserido pelo FleetLifecycleManager)
+        if (!java.awt.GraphicsEnvironment.isHeadless()) {
+            CitySimulationGUI gui = CitySimulationGUI.getInstance();
+            if (gui.getVisualVehicle(getLocalName()) == null) {
+                java.awt.Color carColor = new java.awt.Color(30, 160, 230);
+                gui.addVehicle(getLocalName(), visualDirection, carColor);
+            }
+        }
 
         System.out.println("[VehicleAgent] Viatura regular " + getLocalName() 
                 + " inserida na via " + road + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
 
-        // 3. Comportamento Periódico: Monitorização de tempo de espera e emissão de REQUEST condicional
+        // 4. Comportamento Periódico: Monitorização de tempo de espera e emissão de REQUEST condicional
         addBehaviour(new TickerBehaviour(this, 1500) {
             @Override
             protected void onTick() {
@@ -89,12 +97,13 @@ public class VehicleAgent extends Agent {
             }
         });
 
-        // 4. Comportamento Cíclico: Escuta e tratamento de respostas FIPA dos semáforos
+        // 5. Comportamento Cíclico: Escuta e tratamento de respostas FIPA dos semáforos
         addBehaviour(new CyclicBehaviour(this) {
             @Override
             public void action() {
                 ACLMessage reply = receive();
                 if (reply != null) {
+                    TrafficMetricsCollector.getInstance().recordFipaMessage();
                     processarRespostaFIPA(reply);
                 } else {
                     block();
@@ -103,10 +112,6 @@ public class VehicleAgent extends Agent {
         });
     }
 
-    /**
-     * Regista a viatura no serviço de páginas amarelas do JADE,
-     * incluindo propriedades de eixo para descoberta por outros agentes.
-     */
     private void registarNoDF() {
         DFAgentDescription dfd = new DFAgentDescription();
         dfd.setName(getAID());
@@ -126,91 +131,80 @@ public class VehicleAgent extends Agent {
         }
     }
 
-    /**
-     * Inspeciona os sensores do ambiente; se o tempo de imobilização exceder o limiar estipulado,
-     * descobre dinamicamente o cruzamento mais próximo e emite um pedido FIPA REQUEST
-     * ao semáforo competente desse cruzamento.
-     *
-     * Melhorias da Fase 2:
-     * - Deteta o cruzamento mais próximo via {@link CitySimulationGUI#getTargetIntersection(CitySimulationGUI.VisualVehicle)}.
-     * - Resolve o semáforo via Directory Facilitator em vez de nome hardcoded.
-     * - Anti-debouncing por cruzamento: não reenvia se o último REQUEST ao mesmo cruzamento foi há menos de 6s.
-     */
     private void verificarTempoDeEspera() {
         TrafficEnvironment env = TrafficEnvironment.getInstance();
         double waitSeconds = env.getVehicleWaitSeconds(getLocalName());
         long now = System.currentTimeMillis();
 
-        // Verificar se o limiar de espera foi ultrapassado
         if (waitSeconds < LIMIAR_ESPERA_SEGUNDOS) {
             return;
         }
 
-        // Determinar dinamicamente o cruzamento mais próximo
+        atualizarEixoVisualAtual();
+
+        NetworkTopologyConfig topo = env.getTopology();
+        int maxIntersections = topo.getIntersectionCount();
+
         int targetIntersection = determinarCruzamentoMaisProximo();
-        if (targetIntersection < 0 || targetIntersection > 3) {
-            return; // Veículo fora do alcance de qualquer cruzamento
+        if (targetIntersection < 0 || targetIntersection >= maxIntersections || targetIntersection >= lastRequestPerIntersection.length) {
+            return;
         }
 
-        // Anti-debouncing: verificar intervalo mínimo entre pedidos ao mesmo cruzamento
         if (now - lastRequestPerIntersection[targetIntersection] < INTERVALO_MINIMO_REQUEST_MS) {
             return;
         }
 
-        // Registar o timestamp do pedido
         lastRequestPerIntersection[targetIntersection] = now;
-        lastTargetIntersection = targetIntersection;
 
-        // Resolver o nome do semáforo competente via DF, com fallback para nome canónico
-        String targetSemName = resolverSemaforoViaDF(targetIntersection);
+        String crossingName = topo.getIntersectionName(targetIntersection);
+        String targetSemName = resolverSemaforoViaDF(targetIntersection, crossingName);
 
         System.out.println("[VehicleAgent - " + getLocalName() + "] Tempo de espera crítico atingido (" 
-                + String.format("%.1f", waitSeconds) + "s) no Cruzamento " + CROSSING_NAMES[targetIntersection] 
+                + String.format("%.1f", waitSeconds) + "s) no Cruzamento " + crossingName 
                 + ". A emitir REQUEST a " + targetSemName + "...");
 
         ACLMessage requestMsg = new ACLMessage(ACLMessage.REQUEST);
         requestMsg.addReceiver(new AID(targetSemName, AID.ISLOCALNAME));
         requestMsg.setOntology("traffic-management");
-        requestMsg.setConversationId("req-wait-" + getLocalName() + "-" + CROSSING_NAMES[targetIntersection] + "-" + now);
+        requestMsg.setConversationId("req-wait-" + getLocalName() + "-" + crossingName + "-" + now);
         requestMsg.setContent("PEDIDO_PASSAGEM: Viatura " + getLocalName() + " retida ha " 
-                + String.format("%.1f", waitSeconds) + "s na via " + road 
-                + " junto ao Cruzamento " + CROSSING_NAMES[targetIntersection]);
+                + String.format("%.1f", waitSeconds) + "s na via " + (axis == 0 ? "NS" : "EW") 
+                + " junto ao Cruzamento " + crossingName);
 
         send(requestMsg);
+        TrafficMetricsCollector.getInstance().recordFipaMessage();
     }
 
-    /**
-     * Determina o índice do cruzamento mais próximo com base na posição
-     * real do veículo no simulador gráfico.
-     *
-     * @return Índice do cruzamento (0=NW, 1=NE, 2=SW, 3=SE) ou -1 se indeterminado
-     */
+    private void atualizarEixoVisualAtual() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            CitySimulationGUI.VisualVehicle v = gui.getVisualVehicle(getLocalName());
+            if (v != null) {
+                this.visualDirection = v.direction;
+                this.axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+            }
+        }
+    }
+
     private int determinarCruzamentoMaisProximo() {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         if (gui == null) {
-            return 0; // Fallback seguro em modo headless
+            return 0;
         }
-
         CitySimulationGUI.VisualVehicle v = gui.getVisualVehicle(getLocalName());
         if (v == null) {
-            return 0; // Veículo ainda não registado visualmente
+            return 0;
         }
-
         return gui.getTargetIntersection(v);
     }
 
-    /**
-     * Resolve o nome do agente semáforo competente para o cruzamento e eixo indicados,
-     * consultando primeiro o Directory Facilitator (DF) do JADE.
-     *
-     * Se a pesquisa no DF falhar (ex: semáforo ainda não registado), utiliza o nome
-     * canónico como fallback seguro: "Semaforo_{eixo}_{cruzamento}".
-     *
-     * @param intersectionIndex Índice do cruzamento (0 a 3)
-     * @return Nome local do agente semáforo
-     */
-    private String resolverSemaforoViaDF(int intersectionIndex) {
-        // Tentativa de resolução via DF (Páginas Amarelas)
+    private String resolverSemaforoViaDF(int intersectionIndex, String crossingName) {
+        String cacheKey = intersectionIndex + "_" + axis + "_" + crossingName;
+        String cached = dfSemaphoreCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
         try {
             DFAgentDescription template = new DFAgentDescription();
             ServiceDescription sd = new ServiceDescription();
@@ -222,6 +216,7 @@ public class VehicleAgent extends Agent {
             DFAgentDescription[] results = DFService.search(this, template);
             if (results != null && results.length > 0) {
                 String dfName = results[0].getName().getLocalName();
+                dfSemaphoreCache.put(cacheKey, dfName);
                 return dfName;
             }
         } catch (FIPAException fe) {
@@ -229,15 +224,10 @@ public class VehicleAgent extends Agent {
                     + "] Aviso: Pesquisa no DF falhou. A utilizar nome canónico. Erro: " + fe.getMessage());
         }
 
-        // Fallback: nome canónico do semáforo
         String axisLabel = (axis == 0) ? "NS" : "EW";
-        return "Semaforo_" + axisLabel + "_" + CROSSING_NAMES[intersectionIndex];
+        return "Semaforo_" + axisLabel + "_" + crossingName;
     }
 
-    /**
-     * Processa as respostas FIPA-ACL recebidas dos semáforos.
-     * Loga a performativa e o conteúdo para rastreabilidade completa.
-     */
     private void processarRespostaFIPA(ACLMessage reply) {
         String senderName = reply.getSender().getLocalName();
         String perfName = ACLMessage.getPerformative(reply.getPerformative());
@@ -245,16 +235,15 @@ public class VehicleAgent extends Agent {
 
         System.out.println("[VehicleAgent - " + getLocalName() + "] Resposta FIPA recebida de " 
                 + senderName + " (" + perfName + "): " + content);
-
-        // Tratamento específico de confirmações de passagem
-        if (content != null && content.contains("PEDIDO_REGISTADO")) {
-            System.out.println("[VehicleAgent - " + getLocalName() 
-                    + "] Pedido de passagem confirmado pelo semáforo " + senderName + ".");
-        }
     }
 
     @Override
     protected void takeDown() {
+        FleetLifecycleManager.getInstance().unregisterLiveJadeAgent(getLocalName());
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            gui.removeVehicle(getLocalName());
+        }
         try {
             DFService.deregister(this);
             System.out.println("[VehicleAgent] Viatura " + getLocalName() + " desregistada do DF e terminada.");

@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * - Atuar sobre a infraestrutura rodoviária (comutação semafórica, preempção de socorro).
  * - Consultar métricas de desempenho agregadas em tempo real (Feature 8).
  * - Propagar alertas preditivos de perturbações e condições meteorológicas (Feature 5).
+ * - Gerir o ciclo de vida dinâmico da frota e topologia parametrizável 2×2 / 3×3 (Fase 6.1).
  *
  * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya
  */
@@ -51,7 +52,6 @@ public class TrafficEnvironment {
      * Construtor privado (Padrão Singleton).
      */
     private TrafficEnvironment() {
-        // Assegura a instanciação e arranque da interface visual apenas se não for headless
         if (!java.awt.GraphicsEnvironment.isHeadless()) {
             CitySimulationGUI.getInstance();
         }
@@ -70,16 +70,95 @@ public class TrafficEnvironment {
     }
 
     /* =========================================================================
-     * SENSORES: PERCEÇÃO DO AMBIENTE (Features 1, 2, 3, 6)
+     * TOPOLOGIA, GRAFO RODOVIÁRIO E GESTÃO DE FROTA (Fase 6.1)
      * ========================================================================= */
 
     /**
-     * Perceciona o número de viaturas em aproximação a um cruzamento ao longo de um eixo viário.
-     *
-     * @param intersectionIndex Índice do cruzamento (0=NW, 1=NE, 2=SW, 3=SE)
-     * @param axis Eixo de circulação (0=Norte-Sul, 1=Este-Oeste)
-     * @return Quantidade de veículos detetados no raio sensorial
+     * Obtém a configuração topológica ativa (2×2 ou 3×3).
      */
+    public NetworkTopologyConfig getTopology() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            return gui.getTopology();
+        }
+        return NetworkTopologyConfig.getActive();
+    }
+
+    /**
+     * Obtém o grafo rodoviário direcionado da simulação.
+     */
+    public RoadNetworkGraph getRoadGraph() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        if (gui != null) {
+            return gui.getRoadGraph();
+        }
+        return new RoadNetworkGraph(NetworkTopologyConfig.getActive());
+    }
+
+    /**
+     * Obtém o gestor oficial do ciclo de vida da frota de veículos (limite 0..50 normais + prioritários).
+     */
+    public FleetLifecycleManager getFleetManager() {
+        return FleetLifecycleManager.getInstance();
+    }
+
+    /**
+     * Adiciona dinamicamente um veículo autónomo normal (até ao limite máximo de 50).
+     *
+     * @return ID do veículo adicionado ou {@code null} se o limite de 50 já foi atingido.
+     */
+    public String addNormalVehicle() {
+        return FleetLifecycleManager.getInstance().addNormalVehicle();
+    }
+
+    /**
+     * Remove em segurança um veículo autónomo normal sem afetar veículos prioritários.
+     *
+     * @return ID do veículo removido ou {@code null} se não existirem veículos normais ativos.
+     */
+    public String removeNormalVehicle() {
+        return FleetLifecycleManager.getInstance().removeNormalVehicle();
+    }
+
+    /**
+     * Remove em segurança um veículo autónomo normal específico pelo seu ID.
+     */
+    public boolean removeNormalVehicleById(String vehicleId) {
+        return FleetLifecycleManager.getInstance().removeNormalVehicle(vehicleId);
+    }
+
+    /**
+     * Obtém o número atual de veículos autónomos normais ativos (0..50).
+     */
+    public int getActiveNormalVehicleCount() {
+        return FleetLifecycleManager.getInstance().getActiveNormalVehicleCount();
+    }
+
+    /**
+     * Obtém o limite máximo de veículos normais (50).
+     */
+    public int getMaxNormalVehicles() {
+        return FleetLifecycleManager.MAX_NORMAL_VEHICLES;
+    }
+
+    /**
+     * Obtém o número de veículos prioritários ativos (excluídos do limite de 50).
+     */
+    public int getActivePriorityVehicleCount() {
+        return FleetLifecycleManager.getInstance().getActivePriorityVehicleCount();
+    }
+
+    /**
+     * Verifica se a adição de novos veículos normais está disponível (< 50 ativos).
+     */
+    public boolean isAddNormalVehicleAvailable() {
+        return FleetLifecycleManager.getInstance().isAddNormalVehicleAvailable();
+    }
+
+    /* =========================================================================
+     * SENSORES: PERCEÇÃO DO AMBIENTE (Features 1, 2, 3, 6)
+     * ========================================================================= */
+
     public int getApproachingVehiclesCount(int intersectionIndex, int axis) {
         if (customDataProvider != null) {
             return customDataProvider.getApproachingCount(intersectionIndex, axis);
@@ -88,13 +167,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getApproachingCount(intersectionIndex, axis) : 0;
     }
 
-    /**
-     * Perceciona o número de veículos imobilizados ou em fila de espera num determinado cruzamento e eixo.
-     *
-     * @param intersectionIndex Índice do cruzamento (0=NW, 1=NE, 2=SW, 3=SE)
-     * @param axis Eixo de circulação (0=Norte-Sul, 1=Este-Oeste)
-     * @return Quantidade de veículos com velocidade residual (< 0.2 px/tick)
-     */
     public int getWaitingVehiclesCount(int intersectionIndex, int axis) {
         if (customDataProvider != null) {
             return customDataProvider.getWaitingCount(intersectionIndex, axis);
@@ -103,14 +175,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getWaitingCount(intersectionIndex, axis) : 0;
     }
 
-    /**
-     * Deteta se existe alguma viatura de socorro (ambulância, polícia, bombeiros)
-     * em aproximação prioritária ao cruzamento no eixo especificado.
-     *
-     * @param intersectionIndex Índice do cruzamento
-     * @param axis Eixo viário
-     * @return {@code true} se existir viatura de emergência a requerer passagem prioritária
-     */
     public boolean hasEmergencyApproaching(int intersectionIndex, int axis) {
         if (customDataProvider != null) {
             return customDataProvider.hasEmergencyApproaching(intersectionIndex, axis);
@@ -119,12 +183,6 @@ public class TrafficEnvironment {
         return (gui != null) && gui.hasEmergencyApproaching(intersectionIndex, axis);
     }
 
-    /**
-     * Obtém o tempo de espera acumulado (em segundos) de uma determinada viatura.
-     *
-     * @param vehicleId Identificador da viatura
-     * @return Duração da imobilização atual em segundos
-     */
     public double getVehicleWaitSeconds(String vehicleId) {
         if (customDataProvider != null) {
             return customDataProvider.getVehicleWaitSeconds(vehicleId);
@@ -137,13 +195,6 @@ public class TrafficEnvironment {
      * ATUADORES: AÇÕES SOBRE O AMBIENTE (Features 2, 5, 6, 7)
      * ========================================================================= */
 
-    /**
-     * Atualiza o estado da sinalização luminosa de um semáforo específico.
-     *
-     * @param intersectionIndex Índice do cruzamento
-     * @param axis Eixo viário (0=NS, 1=EW)
-     * @param state Novo estado luminoso (GREEN, YELLOW, RED)
-     */
     public void setTrafficLight(int intersectionIndex, int axis, CitySimulationGUI.LightState state) {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         if (gui != null) {
@@ -151,43 +202,18 @@ public class TrafficEnvironment {
         }
     }
 
-    /**
-     * Executa a preempção imediata de emergência (Feature 6):
-     * Coloca o eixo de emergência a VERDE e o eixo transversal a VERMELHO.
-     *
-     * @param intersectionIndex Cruzamento em causa
-     * @param axis Eixo pelo qual circula a viatura de socorro
-     */
     public void triggerEmergencyPreemption(int intersectionIndex, int axis) {
         IntersectionSafetyAuthority.getAuthority(intersectionIndex).requestEmergency("MANUAL_EMERGENCY", axis, null);
     }
 
-    /**
-     * Obtém a autoridade única de segurança e controlo de fases do cruzamento.
-     *
-     * @param intersectionIndex Índice do cruzamento (0 a 3)
-     * @return Instância de {@link IntersectionSafetyAuthority}
-     */
     public IntersectionSafetyAuthority getIntersectionAuthority(int intersectionIndex) {
         return IntersectionSafetyAuthority.getAuthority(intersectionIndex);
     }
 
-    /**
-     * Atualiza a condição climática / perturbação inferida por Machine Learning (Feature 5).
-     *
-    /**
-     * Atualiza a condição climática / perturbação inferida por Machine Learning (Feature 5).
-     *
-     * @param notice Mensagem explicativa da perturbação
-     * @param speedMultiplier Fator multiplicador de velocidade (ex: 0.70 para piso molhado)
-     */
     public void setDisruptionNotice(String notice, double speedMultiplier) {
         CitySimulationGUI.getInstance().setDisruptionNotice(notice, speedMultiplier);
     }
 
-    /**
-     * Atualiza a indicação HUD de diagnóstico preditivo ML sem alterar a velocidade física dos veículos.
-     */
     public void setMLPredictionNotice(String notice) {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         if (gui != null) {
@@ -195,9 +221,6 @@ public class TrafficEnvironment {
         }
     }
 
-    /**
-     * Obtém o multiplicador de atrito/velocidade imposto pelo ambiente físico real (ex: chuva, obras).
-     */
     public double getEnvironmentalSpeedMultiplier() {
         if (customDataProvider != null) {
             return customDataProvider.getGlobalSpeedMultiplier();
@@ -206,9 +229,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getGlobalSpeedMultiplier() : 1.0;
     }
 
-    /**
-     * Obtém a velocidade média real medida das viaturas em aproximação a um cruzamento (px/tick).
-     */
     public double getAverageSpeed(int intersectionIndex) {
         if (customDataProvider != null) {
             return customDataProvider.getAverageSpeed(intersectionIndex);
@@ -217,9 +237,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getAverageSpeed(intersectionIndex) : 2.4;
     }
 
-    /**
-     * Obtém o tempo médio real de espera das viaturas imobilizadas na fila de um cruzamento (segundos).
-     */
     public double getAverageWaitingTime(int intersectionIndex) {
         if (customDataProvider != null) {
             return customDataProvider.getAverageWaitingTime(intersectionIndex);
@@ -228,9 +245,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getAverageWaitingTime(intersectionIndex) : 0.0;
     }
 
-    /**
-     * Obtém a condição climática física atual (0=SECO, 1=CHUVA, 2=NEVOEIRO).
-     */
     public int getWeatherCondition() {
         if (customDataProvider != null) {
             return customDataProvider.getWeatherCondition();
@@ -239,9 +253,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getWeatherCondition() : 0;
     }
 
-    /**
-     * Obtém a presença física de incidente ou obras (0=NÃO, 1=SIM).
-     */
     public int getIncidentPresent() {
         if (customDataProvider != null) {
             return customDataProvider.getIncidentPresent();
@@ -250,9 +261,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getIncidentPresent() : 0;
     }
 
-    /**
-     * Obtém a capacidade física da via (4 faixas normais, 2 faixas com supressão de obras).
-     */
     public int getRoadCapacity() {
         if (customDataProvider != null) {
             return customDataProvider.getRoadCapacity();
@@ -261,11 +269,6 @@ public class TrafficEnvironment {
         return (gui != null) ? gui.getRoadCapacity() : 4;
     }
 
-    /**
-     * Obtém o estado atual das perturbações rodoviárias.
-     *
-     * @return Texto informativo da perturbação
-     */
     public String getDisruptionNotice() {
         if (customDataProvider != null) {
             return customDataProvider.getDisruptionNotice();
@@ -278,46 +281,25 @@ public class TrafficEnvironment {
      * MÉTRICAS DE DESEMPENHO E TELEMETRIA (Feature 8)
      * ========================================================================= */
 
-    /**
-     * Obtém o tempo médio global de espera por viatura na rede urbana.
-     *
-     * @return Média de espera em segundos
-     */
     public double getAverageWaitSeconds() {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getAverageWaitSeconds() : 0.0;
     }
 
-    /**
-     * Obtém o total acumulado de viaturas que concluíram a travessia de cruzamentos.
-     *
-     * @return Contagem de passagens efetuadas com sucesso
-     */
     public long getTotalCompletedPasses() {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getTotalCompletedPasses() : 0L;
     }
 
-    /**
-     * Obtém o número total de eventos de preempção de socorro ativados com sucesso.
-     *
-     * @return Total de preempções
-     */
     public int getPreemptionCount() {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         return (gui != null) ? gui.getPreemptionCount() : 0;
     }
 
-    /**
-     * Obtém o coletor centralizado de métricas e telemetria da simulação.
-     */
     public metrics.TrafficMetricsCollector getMetricsCollector() {
         return metrics.TrafficMetricsCollector.getInstance();
     }
 
-    /**
-     * Obtém uma fotografia consolidada das métricas da execução atual.
-     */
     public metrics.TrafficMetricsSnapshot getMetricsSnapshot(String runId, String scenario, String controlMode, long seed) {
         return metrics.TrafficMetricsCollector.getInstance().getSnapshot(runId, scenario, controlMode, seed);
     }

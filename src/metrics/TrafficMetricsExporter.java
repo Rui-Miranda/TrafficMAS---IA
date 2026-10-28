@@ -1,5 +1,7 @@
 package metrics;
 
+import environment.NetworkTopologyConfig;
+
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -9,21 +11,19 @@ import java.util.Locale;
 /**
  * Utilitário de Exportação de Métricas Experimentais em Formato Tabular CSV.
  *
- * Gera os ficheiros estruturados em conformidade com a Especificação da Fase 5:
+ * Gera os ficheiros estruturados em conformidade com a Especificação da Fase 5 e Fase 6.1:
  * 1. results/run_summary.csv: Resumo global de cada ensaio/execução.
- * 2. results/intersection_metrics.csv: Detalhe granular por cruzamento.
+ * 2. results/intersection_metrics.csv: Detalhe granular por cruzamento (4 linhas em 2×2, 9 linhas em 3×3).
  *
  * Assegura o tratamento de valores ausentes (N/A) e independência de formatação local (Locale.US).
  *
- * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 5)
+ * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 5 / Fase 6.1)
  */
 public class TrafficMetricsExporter {
 
     public static final String DEFAULT_RESULTS_DIR = "results";
     public static final String RUN_SUMMARY_FILENAME = "run_summary.csv";
     public static final String INTERSECTION_METRICS_FILENAME = "intersection_metrics.csv";
-
-    private static final String[] INTERSECTION_NAMES = {"C1_NW", "C2_NE", "C3_SW", "C4_SE"};
 
     public static final String RUN_SUMMARY_HEADER = 
             "runId,scenario,controlMode,seed,simulationDurationSeconds,realDurationSeconds,"
@@ -83,25 +83,28 @@ public class TrafficMetricsExporter {
     }
 
     /**
-     * Exporta o detalhe por cruzamento para results/intersection_metrics.csv (4 linhas por execução).
+     * Exporta o detalhe por cruzamento para results/intersection_metrics.csv (4 linhas em 2×2 ou 9 linhas em 3×3).
      */
     public static synchronized void exportIntersectionMetrics(File file, TrafficMetricsSnapshot s, boolean append) throws IOException {
         ensureParentDirectory(file);
         boolean writeHeader = !file.exists() || !append || file.length() == 0;
+
+        int n = s.crossingsPerIntersection.length;
+        NetworkTopologyConfig topo = (n >= 9) ? NetworkTopologyConfig.CONFIG_3X3 : NetworkTopologyConfig.CONFIG_2X2;
 
         try (PrintWriter writer = new PrintWriter(new FileWriter(file, append))) {
             if (writeHeader) {
                 writer.println(INTERSECTION_METRICS_HEADER);
             }
 
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < n; i++) {
                 StringBuilder sb = new StringBuilder();
                 sb.append(s.runId).append(",");
                 sb.append(s.scenario).append(",");
                 sb.append(s.controlMode).append(",");
                 sb.append(s.seed).append(",");
                 sb.append(i).append(",");
-                sb.append(INTERSECTION_NAMES[i]).append(",");
+                sb.append(topo.getIntersectionName(i)).append(",");
                 sb.append(s.crossingsPerIntersection[i]).append(",");
                 sb.append(String.format(Locale.US, "%.2f", s.throughputPerIntersection[i])).append(",");
                 sb.append(TrafficMetricsSnapshot.formatDecimalOrNA(s.averageWaitingTimePerIntersection[i], "%.2f")).append(",");

@@ -8,17 +8,14 @@ import java.util.Random;
  * Motor de Simulação de Tráfego em Modo Headless (Sem Interface Gráfica).
  *
  * Reproduz com total fidelidade a cinemática, regras de trânsito, detecções sensoriais
- * e interações semafóricas da {@link CitySimulationGUI}, mas concebido para:
+ * e interações semafóricas da {@link CitySimulationGUI}, parametrizado por {@link NetworkTopologyConfig}
+ * para suportar tanto a malha 2×2 (4 cruzamentos) como a malha 3×3 (9 cruzamentos):
  * 1. Execução ultra-rápida (fast-forward) com temporização determinística (SimulationClock).
  * 2. Determinação rigorosa de cenários com sementes pseudoaleatórias controladas (Random).
- * 3. Integração direta com a {@link IntersectionSafetyAuthority} de cada cruzamento.
- * 4. Fornecimento de telemetria sensorial em tempo real (EnvironmentDataProvider).
- * 5. Suporte aos 4 modos de controlo experimental (FIXED_TIME, LOCAL_ADAPTIVE, MULTIAGENT_COORDINATED, MULTIAGENT_ML).
- *
- * Unidades físicas:
- * - Posição: píxeis (px).
- * - Velocidade: px/tick (em 30 ticks/s, 1.0 px/tick = 30 px/s ≈ 10.8 km/h; velocidade nominal de 2.4 px/tick ≈ 26 km/h).
- * - Tempo: segundos simulados.
+ * 3. Integração direta com a {@link IntersectionSafetyAuthority} de cada cruzamento (4 ou 9).
+ * 4. Integração com {@link RoadNetworkGraph} e {@link AStarPathfinder} para rotas A*.
+ * 5. Fornecimento de telemetria sensorial em tempo real (EnvironmentDataProvider).
+ * 6. Suporte aos 4 modos de controlo experimental (FIXED_TIME, LOCAL_ADAPTIVE, MULTIAGENT_COORDINATED, MULTIAGENT_ML).
  *
  * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya
  */
@@ -42,6 +39,13 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         public double currentStopStartSeconds = -1;
         public boolean wasStopped = false;
         public int startDelayTicks = 0;
+
+        // Campos de navegação A* (Fase 6.1)
+        public AStarPathfinder.RouteResult activeRoute = null;
+        public int routeManeuverIndex = 0;
+        public long routeGraphVersion = -1;
+        public int currentOriginNode = 0;
+        public int currentDestNode = 0;
 
         public SimVehicle(String id, double x, double y, double maxSpeed, int direction, int laneIndex) {
             this.id = id;
@@ -86,51 +90,65 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         }
     }
 
+    private final NetworkTopologyConfig topology;
+    private final RoadNetworkGraph roadGraph;
     private final List<SimVehicle> vehicles = new ArrayList<>();
     private final Random rng;
+    private final Random routeRng;
     private final String scenarioName;
     private final int weatherCondition; // 0, 1, 2
     private final boolean incidentPresent;
     private final double speedMultiplier;
     private final double spawnRatePerSecond;
-    private final double asymmetricBias; // Para tráfego desequilibrado
+    private final double asymmetricBias;
 
     private double currentSimTime = 0.0;
     private int vehicleCounter = 0;
-    private final IntersectionSafetyAuthority[] authorities = new IntersectionSafetyAuthority[4];
+    private int redLightViolationsCount = 0;
+    private final IntersectionSafetyAuthority[] authorities;
     private IntersectionSafetyAuthority.ControlMode controlMode = IntersectionSafetyAuthority.ControlMode.LOCAL_ADAPTIVE;
 
     private double nextCoordinationTime = 3.5;
     private double nextMLInferenceTime = 10.0;
 
     public HeadlessTrafficSimulator(String scenarioName, long randomSeed) {
-        this(scenarioName, randomSeed, IntersectionSafetyAuthority.ControlMode.LOCAL_ADAPTIVE);
+        this(scenarioName, randomSeed, IntersectionSafetyAuthority.ControlMode.LOCAL_ADAPTIVE, NetworkTopologyConfig.getActive());
     }
 
     public HeadlessTrafficSimulator(String scenarioName, long randomSeed, IntersectionSafetyAuthority.ControlMode mode) {
+        this(scenarioName, randomSeed, mode, NetworkTopologyConfig.getActive());
+    }
+
+    public HeadlessTrafficSimulator(String scenarioName, long randomSeed,
+                                    IntersectionSafetyAuthority.ControlMode mode,
+                                    NetworkTopologyConfig topologyConfig) {
+        this.topology = (topologyConfig != null) ? topologyConfig : NetworkTopologyConfig.getActive();
+        this.roadGraph = new RoadNetworkGraph(this.topology);
         this.scenarioName = scenarioName;
         this.rng = new Random(randomSeed);
+        this.routeRng = new Random(randomSeed ^ 0x5DEECE66DL);
         this.controlMode = (mode != null) ? mode : IntersectionSafetyAuthority.ControlMode.LOCAL_ADAPTIVE;
 
-        // Ativa o modo simulado e reinicia as 4 autoridades semafóricas oficiais
+        int interCount = this.topology.getIntersectionCount();
+        this.authorities = new IntersectionSafetyAuthority[interCount];
+
         SimulationClock.enableSimulatedMode(0L);
         SimulationClock.setSimulatedTimeSeconds(0.0);
         IntersectionSafetyAuthority.resetAll();
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < interCount; i++) {
             authorities[i] = IntersectionSafetyAuthority.getAuthority(i);
             authorities[i].setControlMode(this.controlMode);
         }
         TrafficEnvironment.setCustomDataProvider(this);
 
-        // Configuração dos parâmetros segundo o cenário
         switch (scenarioName.toUpperCase()) {
             case "INTENSE":
             case "HEAVY_TRAFFIC":
                 this.weatherCondition = 0;
                 this.incidentPresent = false;
                 this.speedMultiplier = 1.0;
-                this.spawnRatePerSecond = 0.60; // Alta injeção
+                this.spawnRatePerSecond = 0.60;
                 this.asymmetricBias = 0.5;
                 break;
             case "ASYMMETRIC":
@@ -138,34 +156,34 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
                 this.incidentPresent = false;
                 this.speedMultiplier = 1.0;
                 this.spawnRatePerSecond = 0.40;
-                this.asymmetricBias = 0.85; // 85% de fluxo no eixo NS
+                this.asymmetricBias = 0.85;
                 break;
             case "RAIN":
             case "DISRUPTION_EMERGENCY":
                 this.weatherCondition = 1;
                 this.incidentPresent = false;
-                this.speedMultiplier = 0.72; // Atrito reduzido
+                this.speedMultiplier = 0.72;
                 this.spawnRatePerSecond = 0.35;
                 this.asymmetricBias = 0.5;
                 break;
             case "FOG":
                 this.weatherCondition = 2;
                 this.incidentPresent = false;
-                this.speedMultiplier = 0.78; // Visibilidade baixa
+                this.speedMultiplier = 0.78;
                 this.spawnRatePerSecond = 0.25;
                 this.asymmetricBias = 0.5;
                 break;
             case "ACCIDENT":
                 this.weatherCondition = 0;
                 this.incidentPresent = true;
-                this.speedMultiplier = 0.60; // Bloqueio de faixa
+                this.speedMultiplier = 0.60;
                 this.spawnRatePerSecond = 0.40;
                 this.asymmetricBias = 0.5;
                 break;
             case "ROADWORK":
                 this.weatherCondition = 0;
                 this.incidentPresent = true;
-                this.speedMultiplier = 0.65; // Obras com estreitamento
+                this.speedMultiplier = 0.65;
                 this.spawnRatePerSecond = 0.35;
                 this.asymmetricBias = 0.5;
                 break;
@@ -173,7 +191,7 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
                 this.weatherCondition = 0;
                 this.incidentPresent = false;
                 this.speedMultiplier = 0.90;
-                this.spawnRatePerSecond = 0.75; // Grande volume
+                this.spawnRatePerSecond = 0.75;
                 this.asymmetricBias = 0.75;
                 break;
             case "NORMAL":
@@ -181,15 +199,27 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
                 this.weatherCondition = 0;
                 this.incidentPresent = false;
                 this.speedMultiplier = 1.0;
-                this.spawnRatePerSecond = 0.18; // Fluxo moderado e fluido
+                this.spawnRatePerSecond = 0.18;
                 this.asymmetricBias = 0.5;
                 break;
         }
     }
 
+    public NetworkTopologyConfig getTopology() {
+        return topology;
+    }
+
+    public RoadNetworkGraph getRoadGraph() {
+        return roadGraph;
+    }
+
+    public int getRedLightViolationsCount() {
+        return redLightViolationsCount;
+    }
+
     public void setControlMode(IntersectionSafetyAuthority.ControlMode mode) {
         this.controlMode = (mode != null) ? mode : IntersectionSafetyAuthority.ControlMode.LOCAL_ADAPTIVE;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < authorities.length; i++) {
             authorities[i].setControlMode(this.controlMode);
         }
     }
@@ -198,10 +228,6 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         return controlMode;
     }
 
-    /**
-     * Reinicializa o estado de espera das viaturas em circulação no fim do período de aquecimento (warm-up).
-     * Zera o acumulador de esperas anteriores a warmupTime e ajusta o início de imobilização atual para warmupTime.
-     */
     public synchronized void resetWarmupVehicleStates(double warmupTime) {
         for (SimVehicle v : vehicles) {
             v.totalWaitSeconds = 0.0;
@@ -211,9 +237,6 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         }
     }
 
-    /**
-     * Avança a simulação um determinado número de segundos (em passos discretos de 1/30 s = 33.3ms).
-     */
     public void advanceSeconds(double durationSeconds) {
         double dt = 1.0 / 30.0;
         int steps = (int) Math.round(durationSeconds / dt);
@@ -227,7 +250,6 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         SimulationClock.setSimulatedTimeSeconds(currentSimTime);
         metrics.TrafficMetricsCollector.getInstance().setSimulatedTime(currentSimTime);
 
-        // 1. Disparo periódico de coordenação multiagente (Modo C e D) nos instantes exatos
         if (controlMode == IntersectionSafetyAuthority.ControlMode.MULTIAGENT_COORDINATED ||
             controlMode == IntersectionSafetyAuthority.ControlMode.MULTIAGENT_ML) {
             if (currentSimTime >= nextCoordinationTime) {
@@ -240,7 +262,6 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
             }
         }
 
-        // 2. Disparo periódico de inferência Machine Learning (Modo D) nos instantes exatos
         if (controlMode == IntersectionSafetyAuthority.ControlMode.MULTIAGENT_ML) {
             if (currentSimTime >= nextMLInferenceTime) {
                 agents.DisruptionManagementAgent mlAgent = agents.DisruptionManagementAgent.getActiveInstance();
@@ -252,24 +273,20 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
             }
         }
 
-        // 3. Injeção estocástica de viaturas com taxa controlada
         if (rng.nextDouble() < (spawnRatePerSecond * dt)) {
             spawnRandomVehicle();
         }
 
-        // 4. Atualização dos Semáforos via IntersectionSafetyAuthority
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < authorities.length; i++) {
             int waitingNS = getWaitingCount(i, 0);
             int waitingEW = getWaitingCount(i, 1);
             authorities[i].updateTick(waitingNS, waitingEW);
         }
 
-        // 5. Cinemática das Viaturas (Aceleração, Travagem, Stop Lines e Colisão)
         updateVehicles(dt);
 
-        // 6. Amostragem periódica de filas (a cada 1 segundo simulado)
         if (Math.abs(currentSimTime - Math.round(currentSimTime)) < (dt / 2.0)) {
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < authorities.length; i++) {
                 metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 0, getWaitingCount(i, 0));
                 metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 1, getWaitingCount(i, 1));
             }
@@ -283,35 +300,46 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
     }
 
     private void spawnRandomVehicle() {
-        if (vehicles.size() >= 45) return; // Limite de saturação máxima física
+        int maxActive = (topology.getRows() == 3) ? 50 : 45;
+        if (vehicles.size() >= maxActive) return;
 
         int dir;
         if (rng.nextDouble() < asymmetricBias) {
-            dir = rng.nextBoolean() ? 0 : 1; // Eixo NS
+            dir = rng.nextBoolean() ? 0 : 1;
         } else {
-            dir = rng.nextBoolean() ? 2 : 3; // Eixo EW
+            dir = rng.nextBoolean() ? 2 : 3;
         }
 
         int laneIndex = rng.nextInt(2);
         double startX = 0, startY = 0;
 
-        switch (dir) {
-            case 0:
-                startX = (laneIndex == 0) ? (ROAD_X1 + 0.5 * LANE_WIDTH) : (ROAD_X1 + 1.5 * LANE_WIDTH);
-                startY = -20;
-                break;
-            case 1:
-                startX = (laneIndex == 0) ? (ROAD_X2 + 3.5 * LANE_WIDTH) : (ROAD_X2 + 2.5 * LANE_WIDTH);
-                startY = 950;
-                break;
-            case 2:
-                startX = -20;
-                startY = (laneIndex == 0) ? (ROAD_Y1 + 3.5 * LANE_WIDTH) : (ROAD_Y1 + 2.5 * LANE_WIDTH);
-                break;
-            case 3:
-                startX = 950;
-                startY = (laneIndex == 0) ? (ROAD_Y2 + 0.5 * LANE_WIDTH) : (ROAD_Y2 + 1.5 * LANE_WIDTH);
-                break;
+        if (topology.getRows() == 2) {
+            switch (dir) {
+                case 0:
+                    startX = (laneIndex == 0) ? (ROAD_X1 + 0.5 * LANE_WIDTH) : (ROAD_X1 + 1.5 * LANE_WIDTH);
+                    startY = -20;
+                    break;
+                case 1:
+                    startX = (laneIndex == 0) ? (ROAD_X2 + 3.5 * LANE_WIDTH) : (ROAD_X2 + 2.5 * LANE_WIDTH);
+                    startY = 950;
+                    break;
+                case 2:
+                    startX = -20;
+                    startY = (laneIndex == 0) ? (ROAD_Y1 + 3.5 * LANE_WIDTH) : (ROAD_Y1 + 2.5 * LANE_WIDTH);
+                    break;
+                case 3:
+                    startX = 950;
+                    startY = (laneIndex == 0) ? (ROAD_Y2 + 0.5 * LANE_WIDTH) : (ROAD_Y2 + 1.5 * LANE_WIDTH);
+                    break;
+            }
+        } else {
+            int roadIdx = routeRng.nextInt(topology.getRows());
+            startX = (dir == 0 || dir == 1)
+                    ? topology.getLaneCenterCoordinate(roadIdx, dir, laneIndex)
+                    : ((dir == 2) ? -20 : topology.getWorldWidth() - 30);
+            startY = (dir == 2 || dir == 3)
+                    ? topology.getLaneCenterCoordinate(roadIdx, dir, laneIndex)
+                    : ((dir == 0) ? -20 : topology.getWorldHeight() - 30);
         }
 
         for (SimVehicle v : vehicles) {
@@ -321,21 +349,37 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         }
 
         vehicleCounter++;
-        vehicles.add(new SimVehicle("Car_" + vehicleCounter, startX, startY, 2.4, dir, laneIndex));
+        SimVehicle sv = new SimVehicle("Car_" + vehicleCounter, startX, startY, 2.4, dir, laneIndex);
+        assignAStarRoute(sv);
+        vehicles.add(sv);
     }
 
-    /**
-     * Injeta deliberadamente um veículo de emergência na simulação.
-     */
+    private void assignAStarRoute(SimVehicle sv) {
+        int startNode = topology.getTargetIntersection(sv.x, sv.y, sv.direction);
+        int n = topology.getIntersectionCount();
+        int destNode = (startNode + 1 + routeRng.nextInt(Math.max(1, n - 1))) % n;
+        sv.currentOriginNode = startNode;
+        sv.currentDestNode = destNode;
+        sv.activeRoute = AStarPathfinder.findPathAStar(roadGraph, startNode, destNode, sv.direction);
+        sv.routeManeuverIndex = 0;
+        sv.routeGraphVersion = roadGraph.getGraphVersion();
+    }
+
     public SimVehicle injectEmergencyVehicle(String id, int direction, int laneIndex) {
         double startX = 0, startY = 0;
+        int rx0 = topology.getRoadX(0);
+        int rxLast = topology.getRoadX(topology.getCols() - 1);
+        int ry0 = topology.getRoadY(0);
+        int ryLast = topology.getRoadY(topology.getRows() - 1);
+        int maxCoord = Math.max(950, topology.getWorldHeight() - 30);
         switch (direction) {
-            case 0: startX = ROAD_X1 + 0.5 * LANE_WIDTH; startY = -20; break;
-            case 1: startX = ROAD_X2 + 3.5 * LANE_WIDTH; startY = 950; break;
-            case 2: startX = -20; startY = ROAD_Y1 + 3.5 * LANE_WIDTH; break;
-            case 3: startX = 950; startY = ROAD_Y2 + 0.5 * LANE_WIDTH; break;
+            case 0: startX = rx0 + 0.5 * LANE_WIDTH; startY = -20; break;
+            case 1: startX = rxLast + 3.5 * LANE_WIDTH; startY = maxCoord; break;
+            case 2: startX = -20; startY = ry0 + 3.5 * LANE_WIDTH; break;
+            case 3: startX = maxCoord; startY = ryLast + 0.5 * LANE_WIDTH; break;
         }
         SimVehicle em = new SimVehicle(id, startX, startY, 3.2, direction, laneIndex);
+        assignAStarRoute(em);
         vehicles.add(em);
         return em;
     }
@@ -344,26 +388,35 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         List<SimVehicle> toRemove = new ArrayList<>();
 
         for (SimVehicle v : vehicles) {
+            if (v.activeRoute != null && v.routeGraphVersion != roadGraph.getGraphVersion()) {
+                assignAStarRoute(v);
+            }
+
             CitySimulationGUI.LightState light = getSignalForVehicle(v);
             double distToStop = getDistanceToTargetStopLine(v);
 
             double distToLeader = getDistanceToLeadingVehicle(v);
             boolean blockedByLeader = (distToLeader < 38.0);
 
-            // Deteção e pedido de socorro prioritário para viaturas de emergência
-            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia") || v.id.startsWith("Policia")) {
+            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia")
+                    || v.id.startsWith("Policia") || v.id.startsWith("Bombeiros") || v.id.startsWith("Viatura_Policia")) {
                 int interIdx = getTargetIntersection(v);
                 int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
-                if (distToStop >= 0 && distToStop <= 250.0) {
+                if (distToStop >= 0 && distToStop <= 250.0 && interIdx >= 0 && interIdx < authorities.length) {
                     authorities[interIdx].requestEmergency(v.id, axis, v.id);
                 }
             }
 
-            boolean brakeForYellow = (light == CitySimulationGUI.LightState.YELLOW && distToStop <= 55 && distToStop > 15);
-            boolean brakeForRed = (light == CitySimulationGUI.LightState.RED && distToStop <= 65);
+            boolean is3x3 = (topology.getRows() == 3);
+            boolean brakeForYellow = is3x3
+                    ? (light == CitySimulationGUI.LightState.YELLOW && distToStop >= 0 && distToStop <= 55 && distToStop > 15)
+                    : (light == CitySimulationGUI.LightState.YELLOW && distToStop <= 55 && distToStop > 15);
+            boolean brakeForRed = is3x3
+                    ? (light == CitySimulationGUI.LightState.RED && distToStop >= 0 && distToStop <= 65)
+                    : (light == CitySimulationGUI.LightState.RED && distToStop <= 65);
             boolean shouldBrake = blockedByLeader || brakeForYellow || brakeForRed;
 
-            if (incidentPresent && v.laneIndex == 1 && distToStop < 45 && getTargetIntersection(v) == 1) {
+            if (incidentPresent && v.laneIndex == 1 && (!is3x3 || distToStop >= 0) && distToStop < 45 && getTargetIntersection(v) == 1) {
                 shouldBrake = true;
             }
 
@@ -399,22 +452,37 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
                 }
             }
 
+            double stepDist = v.currentSpeed;
+            if (is3x3 && (light == CitySimulationGUI.LightState.RED || brakeForYellow) && distToStop >= 0.0 && stepDist > distToStop) {
+                stepDist = Math.max(0.0, distToStop - 0.5);
+                v.currentSpeed = 0.0;
+                v.wasStopped = true;
+                if (v.currentStopStartSeconds < 0) {
+                    v.currentStopStartSeconds = currentSimTime;
+                }
+            }
+
             double oldX = v.x;
             double oldY = v.y;
 
-            // Move veículo
             switch (v.direction) {
-                case 0: v.y += v.currentSpeed; break;
-                case 1: v.y -= v.currentSpeed; break;
-                case 2: v.x += v.currentSpeed; break;
-                case 3: v.x -= v.currentSpeed; break;
+                case 0: v.y += stepDist; break;
+                case 1: v.y -= stepDist; break;
+                case 2: v.x += stepDist; break;
+                case 3: v.x -= stepDist; break;
             }
 
-            // Deteção física de travessia na linha de saída do cruzamento
+            if (is3x3 && light == CitySimulationGUI.LightState.RED && distToStop >= 0.5) {
+                double newDist = getDistanceToTargetStopLine(v);
+                if (newDist < -0.5) {
+                    redLightViolationsCount++;
+                }
+            }
+
             checkCrossingExitLine(v, oldX, oldY);
 
-            // Remoção de viaturas que saíram dos limites
-            if (v.x < -60 || v.x > 1050 || v.y < -60 || v.y > 1050) {
+            int maxWorld = is3x3 ? Math.max(1050, Math.max(topology.getWorldWidth(), topology.getWorldHeight()) + 60) : 1050;
+            if (v.x < -60 || v.x > maxWorld || v.y < -60 || v.y > maxWorld) {
                 toRemove.add(v);
             }
         }
@@ -424,53 +492,36 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
 
     private void checkCrossingExitLine(SimVehicle v, double oldX, double oldY) {
         int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
-        boolean isWest = (v.x < 460);
-        boolean isNorth = (v.y < 460);
-
-        int interIdx = -1;
-        boolean crossed = false;
-
-        switch (v.direction) {
-            case 0: // N->S
-                if (oldY < (ROAD_Y1 + ROAD_WIDTH) && v.y >= (ROAD_Y1 + ROAD_WIDTH)) {
-                    interIdx = isWest ? 0 : 1;
-                    crossed = true;
-                } else if (oldY < (ROAD_Y2 + ROAD_WIDTH) && v.y >= (ROAD_Y2 + ROAD_WIDTH)) {
-                    interIdx = isWest ? 2 : 3;
-                    crossed = true;
-                }
-                break;
-            case 1: // S->N
-                if (oldY > ROAD_Y2 && v.y <= ROAD_Y2) {
-                    interIdx = isWest ? 2 : 3;
-                    crossed = true;
-                } else if (oldY > ROAD_Y1 && v.y <= ROAD_Y1) {
-                    interIdx = isWest ? 0 : 1;
-                    crossed = true;
-                }
-                break;
-            case 2: // W->E
-                if (oldX < (ROAD_X1 + ROAD_WIDTH) && v.x >= (ROAD_X1 + ROAD_WIDTH)) {
-                    interIdx = isNorth ? 0 : 2;
-                    crossed = true;
-                } else if (oldX < (ROAD_X2 + ROAD_WIDTH) && v.x >= (ROAD_X2 + ROAD_WIDTH)) {
-                    interIdx = isNorth ? 1 : 3;
-                    crossed = true;
-                }
-                break;
-            case 3: // E->W
-                if (oldX > ROAD_X2 && v.x <= ROAD_X2) {
-                    interIdx = isNorth ? 1 : 3;
-                    crossed = true;
-                } else if (oldX > ROAD_X1 && v.x <= ROAD_X1) {
-                    interIdx = isNorth ? 0 : 2;
-                    crossed = true;
-                }
-                break;
+        int interIdx;
+        if (topology.getRows() == 2) {
+            boolean isWest = (v.x < 460);
+            boolean isNorth = (v.y < 460);
+            interIdx = -1;
+            switch (v.direction) {
+                case 0:
+                    if (oldY < (ROAD_Y1 + ROAD_WIDTH) && v.y >= (ROAD_Y1 + ROAD_WIDTH)) interIdx = isWest ? 0 : 1;
+                    else if (oldY < (ROAD_Y2 + ROAD_WIDTH) && v.y >= (ROAD_Y2 + ROAD_WIDTH)) interIdx = isWest ? 2 : 3;
+                    break;
+                case 1:
+                    if (oldY > ROAD_Y2 && v.y <= ROAD_Y2) interIdx = isWest ? 2 : 3;
+                    else if (oldY > ROAD_Y1 && v.y <= ROAD_Y1) interIdx = isWest ? 0 : 1;
+                    break;
+                case 2:
+                    if (oldX < (ROAD_X1 + ROAD_WIDTH) && v.x >= (ROAD_X1 + ROAD_WIDTH)) interIdx = isNorth ? 0 : 2;
+                    else if (oldX < (ROAD_X2 + ROAD_WIDTH) && v.x >= (ROAD_X2 + ROAD_WIDTH)) interIdx = isNorth ? 1 : 3;
+                    break;
+                case 3:
+                    if (oldX > ROAD_X2 && v.x <= ROAD_X2) interIdx = isNorth ? 1 : 3;
+                    else if (oldX > ROAD_X1 && v.x <= ROAD_X1) interIdx = isNorth ? 0 : 2;
+                    break;
+            }
+        } else {
+            interIdx = topology.detectCrossedIntersectionExitLine(oldX, oldY, v.x, v.y, v.direction);
         }
 
-        if (crossed && interIdx >= 0) {
-            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia") || v.id.startsWith("Policia")) {
+        if (interIdx >= 0 && interIdx < authorities.length) {
+            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia")
+                    || v.id.startsWith("Policia") || v.id.startsWith("Bombeiros") || v.id.startsWith("Viatura_Policia")) {
                 authorities[interIdx].notifyEmergencyCleared(v.id);
             }
             double wait = v.totalWaitSeconds;
@@ -485,45 +536,65 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
     private CitySimulationGUI.LightState getSignalForVehicle(SimVehicle v) {
         int interIdx = getTargetIntersection(v);
         int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
+        if (interIdx < 0 || interIdx >= authorities.length) {
+            return CitySimulationGUI.LightState.GREEN;
+        }
         return authorities[interIdx].getLightState(axis);
     }
 
     public int getTargetIntersection(SimVehicle v) {
-        boolean isWest = (v.x < 460);
-        boolean isNorth = (v.y < 460);
-        switch (v.direction) {
-            case 0: return (v.y < ROAD_Y1 - 2) ? (isWest ? 0 : 1) : (isWest ? 2 : 3);
-            case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? (isWest ? 2 : 3) : (isWest ? 0 : 1);
-            case 2: return (v.x < ROAD_X1 - 2) ? (isNorth ? 0 : 2) : (isNorth ? 1 : 3);
-            case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? (isNorth ? 1 : 3) : (isNorth ? 0 : 2);
-            default: return 0;
+        if (topology.getRows() == 2) {
+            boolean isWest = (v.x < 460);
+            boolean isNorth = (v.y < 460);
+            switch (v.direction) {
+                case 0: return (v.y < ROAD_Y1 - 2) ? (isWest ? 0 : 1) : (isWest ? 2 : 3);
+                case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? (isWest ? 2 : 3) : (isWest ? 0 : 1);
+                case 2: return (v.x < ROAD_X1 - 2) ? (isNorth ? 0 : 2) : (isNorth ? 1 : 3);
+                case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? (isNorth ? 1 : 3) : (isNorth ? 0 : 2);
+                default: return 0;
+            }
         }
+        return topology.getTargetIntersection(v.x, v.y, v.direction);
     }
 
     private double getDistanceToTargetStopLine(SimVehicle v) {
-        switch (v.direction) {
-            case 0: return (v.y < ROAD_Y1 - 2) ? ((ROAD_Y1 - 2) - v.y) : ((ROAD_Y2 - 2) - v.y);
-            case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? (v.y - (ROAD_Y2 + ROAD_WIDTH + 2)) : (v.y - (ROAD_Y1 + ROAD_WIDTH + 2));
-            case 2: return (v.x < ROAD_X1 - 2) ? ((ROAD_X1 - 2) - v.x) : ((ROAD_X2 - 2) - v.x);
-            case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? (v.x - (ROAD_X2 + ROAD_WIDTH + 2)) : (v.x - (ROAD_X1 + ROAD_WIDTH + 2));
-            default: return 9999.0;
+        if (topology.getRows() == 2) {
+            switch (v.direction) {
+                case 0: return (v.y < ROAD_Y1 - 2) ? ((ROAD_Y1 - 2) - v.y) : ((ROAD_Y2 - 2) - v.y);
+                case 1: return (v.y > ROAD_Y2 + ROAD_WIDTH + 2) ? (v.y - (ROAD_Y2 + ROAD_WIDTH + 2)) : (v.y - (ROAD_Y1 + ROAD_WIDTH + 2));
+                case 2: return (v.x < ROAD_X1 - 2) ? ((ROAD_X1 - 2) - v.x) : ((ROAD_X2 - 2) - v.x);
+                case 3: return (v.x > ROAD_X2 + ROAD_WIDTH + 2) ? (v.x - (ROAD_X2 + ROAD_WIDTH + 2)) : (v.x - (ROAD_X1 + ROAD_WIDTH + 2));
+                default: return 9999.0;
+            }
         }
+        return topology.getDistanceToTargetStopLine(v.x, v.y, v.direction);
     }
 
     private double getDistanceToLeadingVehicle(SimVehicle v) {
         double minDist = 9999.0;
+        boolean is2x2 = (topology.getRows() == 2);
         for (SimVehicle other : vehicles) {
             if (other == v || other.direction != v.direction || other.laneIndex != v.laneIndex) continue;
             double dist = 9999.0;
             switch (v.direction) {
                 case 0: if (other.y > v.y && Math.abs(other.x - v.x) < 14) dist = other.y - v.y; break;
                 case 1: if (other.y < v.y && Math.abs(other.x - v.x) < 14) dist = v.y - other.y; break;
-                case 2: if (other.x > v.x && Math.abs(other.x - v.x) < 14) dist = other.x - v.x; break;
+                case 2:
+                    if (is2x2) {
+                        if (other.x > v.x && Math.abs(other.x - v.x) < 14) dist = other.x - v.x;
+                    } else {
+                        if (other.x > v.x && Math.abs(other.y - v.y) < 14) dist = other.x - v.x;
+                    }
+                    break;
                 case 3: if (other.x < v.x && Math.abs(other.y - v.y) < 14) dist = v.x - other.x; break;
             }
             if (dist > 0 && dist < minDist) minDist = dist;
         }
         return minDist;
+    }
+
+    public List<SimVehicle> getVehicles() {
+        return vehicles;
     }
 
     @Override
@@ -557,7 +628,8 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
     @Override
     public boolean hasEmergencyApproaching(int intersectionIndex, int axis) {
         for (SimVehicle v : vehicles) {
-            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia")) {
+            if (v.id.startsWith("EM_") || v.id.startsWith("Ambulancia") || v.id.startsWith("Emergencia")
+                    || v.id.startsWith("Policia") || v.id.startsWith("Bombeiros") || v.id.startsWith("Viatura_Policia")) {
                 int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
                 if (targetAxis == axis && getTargetIntersection(v) == intersectionIndex) {
                     double dist = getDistanceToTargetStopLine(v);
@@ -636,9 +708,6 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
         return "Cenário: " + scenarioName + " | Clima=" + weatherCondition + " | Incidente=" + incidentPresent;
     }
 
-    /**
-     * Extrai um snapshot de métricas no cruzamento especificado no instante temporal atual.
-     */
     public IntersectionMetricsSnapshot captureSnapshot(int intersectionId) {
         int volume = 0;
         int queue = 0;

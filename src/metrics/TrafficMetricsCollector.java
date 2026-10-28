@@ -1,5 +1,7 @@
 package metrics;
 
+import environment.NetworkTopologyConfig;
+
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -9,7 +11,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * Coletor Centralizado de Métricas e Telemetria Experimental do TrafficMAS.
  *
  * Concebido para operar com máxima precisão tanto em modo Gráfico (Swing)
- * como em modo Headless (simulação acelerada), sem introduzir distorções na dinâmica viária.
+ * como em modo Headless (simulação acelerada), suportando a topologia 2×2 (4 cruzamentos)
+ * e a topologia 3×3 (9 cruzamentos).
  *
  * Características arquiteturais:
  * 1. Separação explícita entre Tempo Simulado (segundos) e Tempo Real de Parede (milissegundos).
@@ -18,11 +21,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * 4. Registo do ciclo de vida completo de veículos de emergência (requisição, concessão e desimpedimento).
  * 5. Monitorização da cadeia FIPA e adesão de diretivas ML (alerta -> pedido -> aplicação -> revogação).
  *
- * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 5)
+ * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 5 / Fase 6.1)
  */
 public class TrafficMetricsCollector {
 
     private static volatile TrafficMetricsCollector instance = null;
+
+    private final int intersectionCount;
 
     // Relógio e Temporização
     private volatile double currentSimTimeSeconds = 0.0;
@@ -32,11 +37,11 @@ public class TrafficMetricsCollector {
 
     // Registo de Travessias e Espera
     private final AtomicLong totalCrossings = new AtomicLong(0);
-    private final AtomicLong[] crossingsPerIntersection = new AtomicLong[4];
-    private final AtomicLong[][] crossingsPerAxis = new AtomicLong[4][2]; // [interIdx][0=NS, 1=EW]
+    private final AtomicLong[] crossingsPerIntersection;
+    private final AtomicLong[][] crossingsPerAxis; // [interIdx][0=NS, 1=EW]
 
     private double totalWaitTimeSeconds = 0.0;
-    private final double[] waitTimePerIntersection = new double[4];
+    private final double[] waitTimePerIntersection;
     private final Set<String> uniqueVehicles = ConcurrentHashMap.newKeySet();
     private final Map<String, Double> waitTimePerVehicle = new ConcurrentHashMap<>();
     private final Map<String, Integer> crossingsPerVehicle = new ConcurrentHashMap<>();
@@ -47,9 +52,12 @@ public class TrafficMetricsCollector {
 
     // Amostragem de Filas (Queue Lengths)
     private final AtomicLong totalQueueSamples = new AtomicLong(0);
-    private final AtomicLong[][] queueSamplesPerIntersection = new AtomicLong[4][2];
-    private final AtomicLong[][] queueSumPerIntersection = new AtomicLong[4][2];
-    private final AtomicInteger[][] maxQueuePerIntersection = new AtomicInteger[4][2];
+    private final AtomicLong[][] queueSamplesPerIntersection;
+    private final AtomicLong[][] queueSumPerIntersection;
+    private final AtomicInteger[][] maxQueuePerIntersection;
+
+    // Contagem de mensagens FIPA-ACL trocadas
+    private final AtomicLong fipaMessagesCount = new AtomicLong(0);
 
     // Registo de Veículos de Emergência
     public static class EmergencyEventRecord {
@@ -74,8 +82,8 @@ public class TrafficMetricsCollector {
     private final List<EmergencyEventRecord> completedEmergencies = Collections.synchronizedList(new ArrayList<>());
     private final AtomicInteger emergencyRequestsCount = new AtomicInteger(0);
     private final AtomicInteger emergencyPreemptionsCount = new AtomicInteger(0);
-    private final AtomicInteger[] emergencyRequestsPerIntersection = new AtomicInteger[4];
-    private final AtomicInteger[] emergencyPreemptionsPerIntersection = new AtomicInteger[4];
+    private final AtomicInteger[] emergencyRequestsPerIntersection;
+    private final AtomicInteger[] emergencyPreemptionsPerIntersection;
 
     // Registo de Coordenação FIPA e Machine Learning
     public static class CoordinationEventRecord {
@@ -127,13 +135,33 @@ public class TrafficMetricsCollector {
     private final AtomicInteger coordinationAcceptedCount = new AtomicInteger(0);
     private final AtomicInteger coordinationAppliedCount = new AtomicInteger(0);
     private final AtomicInteger coordinationPreemptedCount = new AtomicInteger(0);
-    private final AtomicInteger[] coordinationAppliedPerIntersection = new AtomicInteger[4];
+    private final AtomicInteger[] coordinationAppliedPerIntersection;
 
     /**
-     * Construtor do coletor. Inicializa estruturas atómicas e acumuladores.
+     * Construtor do coletor com número de cruzamentos da topologia ativa.
      */
     public TrafficMetricsCollector() {
-        for (int i = 0; i < 4; i++) {
+        this(NetworkTopologyConfig.getActive().getIntersectionCount());
+    }
+
+    /**
+     * Construtor parametrizado do coletor para N cruzamentos (4 em 2×2, 9 em 3×3).
+     */
+    public TrafficMetricsCollector(int intersectionCount) {
+        this.intersectionCount = Math.max(4, intersectionCount);
+        int cap = Math.max(9, this.intersectionCount);
+
+        this.crossingsPerIntersection = new AtomicLong[cap];
+        this.crossingsPerAxis = new AtomicLong[cap][2];
+        this.waitTimePerIntersection = new double[cap];
+        this.queueSamplesPerIntersection = new AtomicLong[cap][2];
+        this.queueSumPerIntersection = new AtomicLong[cap][2];
+        this.maxQueuePerIntersection = new AtomicInteger[cap][2];
+        this.emergencyRequestsPerIntersection = new AtomicInteger[cap];
+        this.emergencyPreemptionsPerIntersection = new AtomicInteger[cap];
+        this.coordinationAppliedPerIntersection = new AtomicInteger[cap];
+
+        for (int i = 0; i < cap; i++) {
             crossingsPerIntersection[i] = new AtomicLong(0);
             emergencyRequestsPerIntersection[i] = new AtomicInteger(0);
             emergencyPreemptionsPerIntersection[i] = new AtomicInteger(0);
@@ -156,7 +184,23 @@ public class TrafficMetricsCollector {
     }
 
     public static synchronized void reset() {
-        instance = new TrafficMetricsCollector();
+        instance = new TrafficMetricsCollector(NetworkTopologyConfig.getActive().getIntersectionCount());
+    }
+
+    public static synchronized void reset(int intersectionCount) {
+        instance = new TrafficMetricsCollector(intersectionCount);
+    }
+
+    public int getIntersectionCount() {
+        return intersectionCount;
+    }
+
+    public void recordFipaMessage() {
+        fipaMessagesCount.incrementAndGet();
+    }
+
+    public long getFipaMessagesCount() {
+        return fipaMessagesCount.get();
     }
 
     /* =========================================================================
@@ -208,13 +252,13 @@ public class TrafficMetricsCollector {
      * Regista a travessia efetiva de um veículo pela linha de saída de um cruzamento.
      *
      * @param vehicleId Identificador da viatura
-     * @param intersectionIndex Cruzamento transposto (0 a 3)
+     * @param intersectionIndex Cruzamento transposto (0..intersectionCount-1)
      * @param axis Eixo de travessia (0=NS, 1=EW)
      * @param waitTimeSeconds Tempo de espera acumulado nesta aproximação
      * @return true se a travessia for inédita e registada com sucesso; false se for duplicada (debounce)
      */
     public synchronized boolean recordCrossing(String vehicleId, int intersectionIndex, int axis, double waitTimeSeconds) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4 || axis < 0 || axis > 1) {
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount || axis < 0 || axis > 1) {
             return false;
         }
 
@@ -249,14 +293,14 @@ public class TrafficMetricsCollector {
     }
 
     public long getCrossings(int intersectionIndex) {
-        if (intersectionIndex >= 0 && intersectionIndex < 4) {
+        if (intersectionIndex >= 0 && intersectionIndex < intersectionCount) {
             return crossingsPerIntersection[intersectionIndex].get();
         }
         return 0;
     }
 
     public long getCrossings(int intersectionIndex, int axis) {
-        if (intersectionIndex >= 0 && intersectionIndex < 4 && axis >= 0 && axis <= 1) {
+        if (intersectionIndex >= 0 && intersectionIndex < intersectionCount && axis >= 0 && axis <= 1) {
             return crossingsPerAxis[intersectionIndex][axis].get();
         }
         return 0;
@@ -268,7 +312,7 @@ public class TrafficMetricsCollector {
     }
 
     public synchronized double getAverageWaitingTimeSeconds(int intersectionIndex) {
-        if (intersectionIndex >= 0 && intersectionIndex < 4) {
+        if (intersectionIndex >= 0 && intersectionIndex < intersectionCount) {
             long count = crossingsPerIntersection[intersectionIndex].get();
             return (count > 0) ? (waitTimePerIntersection[intersectionIndex] / count) : -1.0;
         }
@@ -299,7 +343,7 @@ public class TrafficMetricsCollector {
     }
 
     public double getThroughputPerMinute(int intersectionIndex) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return 0.0;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return 0.0;
         double minutes = getSimulatedDurationSeconds() / 60.0;
         return (minutes > 0) ? (crossingsPerIntersection[intersectionIndex].get() / minutes) : 0.0;
     }
@@ -309,7 +353,7 @@ public class TrafficMetricsCollector {
      * ========================================================================= */
 
     public void sampleQueue(int intersectionIndex, int axis, int queueLength) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4 || axis < 0 || axis > 1) return;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount || axis < 0 || axis > 1) return;
         int q = Math.max(0, queueLength);
 
         totalQueueSamples.incrementAndGet();
@@ -324,7 +368,7 @@ public class TrafficMetricsCollector {
         if (totalSamples == 0) return 0.0;
 
         long sum = 0;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < intersectionCount; i++) {
             for (int a = 0; a < 2; a++) {
                 sum += queueSumPerIntersection[i][a].get();
             }
@@ -333,7 +377,7 @@ public class TrafficMetricsCollector {
     }
 
     public double getAverageQueueLength(int intersectionIndex) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return 0.0;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return 0.0;
         long samples = queueSamplesPerIntersection[intersectionIndex][0].get() 
                      + queueSamplesPerIntersection[intersectionIndex][1].get();
         if (samples == 0) return 0.0;
@@ -344,14 +388,14 @@ public class TrafficMetricsCollector {
     }
 
     public double getAverageQueueLength(int intersectionIndex, int axis) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4 || axis < 0 || axis > 1) return 0.0;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount || axis < 0 || axis > 1) return 0.0;
         long samples = queueSamplesPerIntersection[intersectionIndex][axis].get();
         return (samples > 0) ? ((double) queueSumPerIntersection[intersectionIndex][axis].get() / samples) : 0.0;
     }
 
     public int getMaximumQueueLength() {
         int max = 0;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < intersectionCount; i++) {
             for (int a = 0; a < 2; a++) {
                 max = Math.max(max, maxQueuePerIntersection[i][a].get());
             }
@@ -360,13 +404,13 @@ public class TrafficMetricsCollector {
     }
 
     public int getMaximumQueueLength(int intersectionIndex) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return 0;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return 0;
         return Math.max(maxQueuePerIntersection[intersectionIndex][0].get(),
                         maxQueuePerIntersection[intersectionIndex][1].get());
     }
 
     public int getMaximumQueueLength(int intersectionIndex, int axis) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4 || axis < 0 || axis > 1) return 0;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount || axis < 0 || axis > 1) return 0;
         return maxQueuePerIntersection[intersectionIndex][axis].get();
     }
 
@@ -379,7 +423,7 @@ public class TrafficMetricsCollector {
      * ========================================================================= */
 
     public synchronized void recordEmergencyRequest(String vehicleId, int intersectionIndex, int axis) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return;
         String key = vehicleId + "_C" + intersectionIndex;
 
         // Se já existe pedido ativo para a mesma viatura neste cruzamento, trata-se de reenvio FIPA (idempotente)
@@ -396,7 +440,7 @@ public class TrafficMetricsCollector {
     }
 
     public synchronized void recordEmergencyAccepted(String vehicleId, int intersectionIndex) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return;
         String key = vehicleId + "_C" + intersectionIndex;
         EmergencyEventRecord rec = activeEmergencies.get(key);
         if (rec != null && rec.acceptedSimTime < 0) {
@@ -405,7 +449,7 @@ public class TrafficMetricsCollector {
     }
 
     public synchronized void recordEmergencyGreenGranted(String vehicleId, int intersectionIndex) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return;
         String key = vehicleId + "_C" + intersectionIndex;
         EmergencyEventRecord rec = activeEmergencies.get(key);
         if (rec != null && !rec.isPreempted) {
@@ -417,7 +461,7 @@ public class TrafficMetricsCollector {
     }
 
     public synchronized void recordEmergencyCleared(String vehicleId, int intersectionIndex) {
-        if (intersectionIndex < 0 || intersectionIndex >= 4) return;
+        if (intersectionIndex < 0 || intersectionIndex >= intersectionCount) return;
         String key = vehicleId + "_C" + intersectionIndex;
         EmergencyEventRecord rec = activeEmergencies.remove(key);
         if (rec != null) {
@@ -497,7 +541,7 @@ public class TrafficMetricsCollector {
         if (rec != null && rec.appliedSimTime < 0) {
             rec.appliedSimTime = currentSimTimeSeconds;
             coordinationAppliedCount.incrementAndGet();
-            if (intersectionIndex >= 0 && intersectionIndex < 4) {
+            if (intersectionIndex >= 0 && intersectionIndex < intersectionCount) {
                 coordinationAppliedPerIntersection[intersectionIndex].incrementAndGet();
             }
         }
@@ -543,16 +587,17 @@ public class TrafficMetricsCollector {
      * ========================================================================= */
 
     public synchronized TrafficMetricsSnapshot getSnapshot(String runId, String scenario, String controlMode, long seed) {
-        long[] crossings = new long[4];
-        double[] throughput = new double[4];
-        double[] avgWait = new double[4];
-        double[] avgQueue = new double[4];
-        int[] maxQueue = new int[4];
-        int[] emergReq = new int[4];
-        int[] emergPreempt = new int[4];
-        int[] coordApp = new int[4];
+        int n = intersectionCount;
+        long[] crossings = new long[n];
+        double[] throughput = new double[n];
+        double[] avgWait = new double[n];
+        double[] avgQueue = new double[n];
+        int[] maxQueue = new int[n];
+        int[] emergReq = new int[n];
+        int[] emergPreempt = new int[n];
+        int[] coordApp = new int[n];
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < n; i++) {
             crossings[i] = crossingsPerIntersection[i].get();
             throughput[i] = getThroughputPerMinute(i);
             avgWait[i] = getAverageWaitingTimeSeconds(i);

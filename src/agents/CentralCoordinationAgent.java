@@ -1,6 +1,8 @@
 package agents;
 
+import environment.FleetLifecycleManager;
 import environment.IntersectionSafetyAuthority;
+import environment.NetworkTopologyConfig;
 import environment.TrafficEnvironment;
 import jade.core.AID;
 import jade.core.Agent;
@@ -11,6 +13,8 @@ import jade.domain.FIPAAgentManagement.DFAgentDescription;
 import jade.domain.FIPAAgentManagement.ServiceDescription;
 import jade.domain.FIPAException;
 import jade.lang.acl.ACLMessage;
+import metrics.TrafficMetricsCollector;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -19,18 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Agente Coordenador Central da Rede Semafórica (Fase 3 - Coordenação Multiagente Real).
- *
- * Responsabilidades:
- * 1. Recolha periódica de telemetria dos 4 cruzamentos (via FIPA-ACL e sensores).
- * 2. Manutenção do estado global da malha urbana (filas, tempos, emergências).
- * 3. Identificação de estrangulamentos e corredores congestionados.
- * 4. Determinação de políticas de coordenação:
- *    - ONDA VERDE: sincronismo e desfasamento (offset temporal) entre nós consecutivos.
- *    - EQUILÍBRIO ADAPTATIVO: redistribuição de tempos de verde em nós assimétricos.
- * 5. Emissão de diretivas FIPA-ACL (REQUEST) aos agentes semáforo.
- * 6. Controlo de ciclo de vida FIPA: confirmação (AGREE/REFUSE) e confirmação de aplicação (INFORM: APPLIED).
- * 7. Histórico e auditoria de comandos emitidos e aplicados.
+ * Agente Coordenador Central da Rede Semafórica (Fase 3 / Fase 6.1 - Coordenação Multiagente Real).
  *
  * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya
  */
@@ -38,7 +31,12 @@ public class CentralCoordinationAgent extends Agent {
 
     public static final String[] CROSSINGS = {"C1_NW", "C2_NE", "C3_SW", "C4_SE"};
 
-    /** Telemetria em tempo real de um cruzamento */
+    public static final String[] CROSSINGS_3X3 = {
+        "C1_NW", "C2_N", "C3_NE",
+        "C4_W",  "C5_C", "C6_E",
+        "C7_SW", "C8_S", "C9_SE"
+    };
+
     public static class IntersectionTelemetry {
         public final int intersectionIndex;
         public int waitingNS = 0;
@@ -57,7 +55,6 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    /** Registo de comando emitido pelo coordenador */
     public static class CoordinatedCommandRecord {
         public final String cmdId;
         public final String policyType;
@@ -66,7 +63,7 @@ public class CentralCoordinationAgent extends Agent {
         public final long plannedDurationMs;
         public final long offsetMs;
         public final long issuedTimestamp;
-        public String status; // "SENT", "AGREED", "REFUSED", "APPLIED", "APPLIED_THEN_PREEMPTED"
+        public String status;
         public String refusalReason = null;
         public long appliedTimestamp = 0;
         public boolean wasApplied = false;
@@ -85,19 +82,12 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    // Telemetria agregada dos 4 cruzamentos (0 a 3)
     private final Map<Integer, IntersectionTelemetry> telemetryMap = new ConcurrentHashMap<>();
-
-    // Registo de comandos e auditoria
     private final Map<String, CoordinatedCommandRecord> commandRecords = new ConcurrentHashMap<>();
     private final List<String> commandHistory = Collections.synchronizedList(new ArrayList<>());
     private final AtomicLong commandSeq = new AtomicLong(1000);
-
-    // Cruzamentos que já aderiram com sucesso a políticas
     private final Map<Integer, Long> lastAdherenceByIntersection = new ConcurrentHashMap<>();
 
-    // ======================== ESTADO DE PERTURBAÇÕES ML (Fase 4 - Etapa 4) ========================
-    /** Último alerta DISTURBANCE_ALERT recebido do DisruptionManagementAgent (ML) */
     private volatile String lastMLAlertId = null;
     private volatile int lastMLAlertIntersection = -1;
     private volatile double lastMLAlertProbability = -1.0;
@@ -106,7 +96,6 @@ public class CentralCoordinationAgent extends Agent {
     private volatile int mlAlertCount = 0;
     private volatile String lastAdaptiveCommandId = null;
 
-    // Instância única partilhada para facilitar consulta em suites de testes
     private static volatile CentralCoordinationAgent activeInstance = null;
 
     public static CentralCoordinationAgent getActiveInstance() {
@@ -116,18 +105,18 @@ public class CentralCoordinationAgent extends Agent {
     @Override
     protected void setup() {
         activeInstance = this;
+        FleetLifecycleManager.getInstance().registerLiveJadeAgent(getLocalName(), "CentralCoordinationAgent");
 
-        // Inicializa estrutura de telemetria para os 4 cruzamentos
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 9; i++) {
             telemetryMap.put(i, new IntersectionTelemetry(i));
         }
 
-        // 1. Registo no Directory Facilitator (DFService)
         registarNoDF();
 
-        System.out.println("[CentralCoordinationAgent] Agente Coordenador Central online na malha urbana (4 cruzamentos).");
+        int interCount = NetworkTopologyConfig.getActive().getIntersectionCount();
+        System.out.println("[CentralCoordinationAgent] Agente Coordenador Central online na malha urbana (" 
+                + interCount + " cruzamentos).");
 
-        // 2. Comportamento Periódico: Auditoria e Tomada de Decisão Macro (a cada 3.5 segundos em modo tempo real)
         addBehaviour(new TickerBehaviour(this, 3500) {
             @Override
             protected void onTick() {
@@ -138,12 +127,14 @@ public class CentralCoordinationAgent extends Agent {
             }
         });
 
-        // 3. Comportamento Cíclico: Receção e tratamento de comunicações FIPA-ACL
         addBehaviour(new CyclicBehaviour(this) {
             @Override
             public void action() {
-                ACLMessage msg = receive();
+                jade.lang.acl.MessageTemplate mt = jade.lang.acl.MessageTemplate.not(
+                        jade.lang.acl.MessageTemplate.MatchSender(getDefaultDF()));
+                ACLMessage msg = receive(mt);
                 if (msg != null) {
+                    TrafficMetricsCollector.getInstance().recordFipaMessage();
                     processarMensagemFIPA(msg);
                 } else {
                     block();
@@ -152,9 +143,6 @@ public class CentralCoordinationAgent extends Agent {
         });
     }
 
-    /**
-     * Regista o coordenador nas Páginas Amarelas do JADE.
-     */
     private void registarNoDF() {
         DFAgentDescription dfd = new DFAgentDescription();
         dfd.setName(getAID());
@@ -172,15 +160,26 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    /**
-     * Inspeciona a rede viária e decide políticas macro de tráfego.
-     */
+    private String resolveCrossingName(int intersectionIndex) {
+        NetworkTopologyConfig topo = NetworkTopologyConfig.getActive();
+        if (intersectionIndex >= 0 && intersectionIndex < topo.getIntersectionCount()) {
+            return topo.getIntersectionName(intersectionIndex);
+        }
+        if (intersectionIndex >= 0 && intersectionIndex < CROSSINGS_3X3.length) {
+            return CROSSINGS_3X3[intersectionIndex];
+        }
+        return "C" + (intersectionIndex + 1);
+    }
+
     public synchronized void auditarRedeETomarDecisoes() {
         TrafficEnvironment env = TrafficEnvironment.getInstance();
+        NetworkTopologyConfig topo = env.getTopology();
+        int n = topo.getIntersectionCount();
+        int rows = topo.getRows();
+        int cols = topo.getCols();
 
-        // Atualiza telemetria sensorial caso algum semáforo ainda não tenha reportado via FIPA
-        for (int i = 0; i < 4; i++) {
-            IntersectionTelemetry tel = telemetryMap.get(i);
+        for (int i = 0; i < n; i++) {
+            IntersectionTelemetry tel = telemetryMap.computeIfAbsent(i, IntersectionTelemetry::new);
             int waitingNS = env.getWaitingVehiclesCount(i, 0);
             int waitingEW = env.getWaitingVehiclesCount(i, 1);
             boolean hasEmerg = env.hasEmergencyApproaching(i, 0) || env.hasEmergencyApproaching(i, 1);
@@ -191,70 +190,64 @@ public class CentralCoordinationAgent extends Agent {
             tel.lastUpdatedMs = environment.SimulationClock.currentTimeMillis();
         }
 
-        // 1. Deteção de Congestionamento em Corredores (Onda Verde)
-        // Corredor Horizontal Norte: C1_NW (0) <--> C2_NE (1) no eixo Este-Oeste (axis 1)
-        int corridorNorthEW = telemetryMap.get(0).waitingEW + telemetryMap.get(1).waitingEW;
-        if (corridorNorthEW >= 3 && !telemetryMap.get(0).hasEmergency && !telemetryMap.get(1).hasEmergency) {
-            System.out.println("[CentralCoordinationAgent] >>> CONGESTIONAMENTO DETETADO no Corredor Norte EW (" 
-                    + corridorNorthEW + " viaturas). A programar ONDA VERDE...");
-            coordenarOndaVerdeHorizontal(0, 1, 1);
-            return;
+        // 1. Deteção de Congestionamento em Corredores Horizontais (Eixo EW = 1)
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols - 1; c++) {
+                int upIdx = topo.getIntersectionIndex(r, c);
+                int dnIdx = topo.getIntersectionIndex(r, c + 1);
+                IntersectionTelemetry tUp = telemetryMap.get(upIdx);
+                IntersectionTelemetry tDn = telemetryMap.get(dnIdx);
+                int corridorEW = tUp.waitingEW + tDn.waitingEW;
+                if (corridorEW >= 3 && !tUp.hasEmergency && !tDn.hasEmergency) {
+                    System.out.println("[CentralCoordinationAgent] >>> CONGESTIONAMENTO DETETADO no Corredor Horizontal L" 
+                            + (r + 1) + " EW (" + corridorEW + " viaturas). A programar ONDA VERDE...");
+                    coordenarOndaVerdeHorizontal(upIdx, dnIdx, 1);
+                    return;
+                }
+            }
         }
 
-        // Corredor Horizontal Sul: C3_SW (2) <--> C4_SE (3) no eixo Este-Oeste (axis 1)
-        int corridorSouthEW = telemetryMap.get(2).waitingEW + telemetryMap.get(3).waitingEW;
-        if (corridorSouthEW >= 3 && !telemetryMap.get(2).hasEmergency && !telemetryMap.get(3).hasEmergency) {
-            System.out.println("[CentralCoordinationAgent] >>> CONGESTIONAMENTO DETETADO no Corredor Sul EW (" 
-                    + corridorSouthEW + " viaturas). A programar ONDA VERDE...");
-            coordenarOndaVerdeHorizontal(2, 3, 1);
-            return;
+        // 2. Deteção de Congestionamento em Corredores Verticais (Eixo NS = 0)
+        for (int c = 0; c < cols; c++) {
+            for (int r = 0; r < rows - 1; r++) {
+                int upIdx = topo.getIntersectionIndex(r, c);
+                int dnIdx = topo.getIntersectionIndex(r + 1, c);
+                IntersectionTelemetry tUp = telemetryMap.get(upIdx);
+                IntersectionTelemetry tDn = telemetryMap.get(dnIdx);
+                int corridorNS = tUp.waitingNS + tDn.waitingNS;
+                if (corridorNS >= 3 && !tUp.hasEmergency && !tDn.hasEmergency) {
+                    System.out.println("[CentralCoordinationAgent] >>> CONGESTIONAMENTO DETETADO no Corredor Vertical C" 
+                            + (c + 1) + " NS (" + corridorNS + " viaturas). A programar ONDA VERDE...");
+                    coordenarOndaVerdeVertical(upIdx, dnIdx, 0);
+                    return;
+                }
+            }
         }
 
-        // Corredor Vertical Oeste: C1_NW (0) <--> C3_SW (2) no eixo Norte-Sul (axis 0)
-        int corridorWestNS = telemetryMap.get(0).waitingNS + telemetryMap.get(2).waitingNS;
-        if (corridorWestNS >= 3 && !telemetryMap.get(0).hasEmergency && !telemetryMap.get(2).hasEmergency) {
-            System.out.println("[CentralCoordinationAgent] >>> CONGESTIONAMENTO DETETADO no Corredor Oeste NS (" 
-                    + corridorWestNS + " viaturas). A programar ONDA VERDE...");
-            coordenarOndaVerdeVertical(0, 2, 0);
-            return;
-        }
-
-        // 2. Deteção de Assimetria Local (Equilíbrio Adaptativo por Cruzamento)
-        for (int i = 0; i < 4; i++) {
+        // 3. Deteção de Assimetria Local (Equilíbrio Adaptativo por Cruzamento)
+        for (int i = 0; i < n; i++) {
             IntersectionTelemetry tel = telemetryMap.get(i);
-            if (tel.hasEmergency) continue; // Emergência tem prioridade estrita, não interfere
+            if (tel.hasEmergency) continue;
 
             if (tel.waitingNS >= 3 && tel.waitingEW <= 1) {
-                emitirPoliticaEquilibrio(i, 0, 6000); // Prioriza NS com 6s de verde
+                emitirPoliticaEquilibrio(i, 0, 6000);
             } else if (tel.waitingEW >= 3 && tel.waitingNS <= 1) {
-                emitirPoliticaEquilibrio(i, 1, 6000); // Prioriza EW com 6s de verde
+                emitirPoliticaEquilibrio(i, 1, 6000);
             }
         }
     }
 
-    /**
-     * Coordena uma Onda Verde entre dois cruzamentos horizontais adjacentes.
-     *
-     * Distância física: 360 px (ROAD_X2 - ROAD_X1 = 640 - 280).
-     * Velocidade média de tráfego: ~75 px/s -> Tempo de viagem estimado: ~4800 ms.
-     */
     public synchronized void coordenarOndaVerdeHorizontal(int upstreamIdx, int downstreamIdx, int axis) {
         long seq = commandSeq.incrementAndGet();
         String cmdUp = "CMD_GW_H_UP_" + seq;
         String cmdDown = "CMD_GW_H_DN_" + seq;
         long duration = 6500;
-        long travelTimeOffsetMs = 4500; // Desfasamento para permitir a chegada do pelotão
+        long travelTimeOffsetMs = 4500;
 
-        // 1. Comando a montante (offset = 0)
         enviarComandoCoordenação(upstreamIdx, axis, cmdUp, "GREEN_WAVE", duration, 0);
-
-        // 2. Comando a jusante (offset = 4500ms)
         enviarComandoCoordenação(downstreamIdx, axis, cmdDown, "GREEN_WAVE", duration, travelTimeOffsetMs);
     }
 
-    /**
-     * Coordena uma Onda Verde entre dois cruzamentos verticais adjacentes.
-     */
     public synchronized void coordenarOndaVerdeVertical(int upstreamIdx, int downstreamIdx, int axis) {
         long seq = commandSeq.incrementAndGet();
         String cmdUp = "CMD_GW_V_UP_" + seq;
@@ -266,29 +259,22 @@ public class CentralCoordinationAgent extends Agent {
         enviarComandoCoordenação(downstreamIdx, axis, cmdDown, "GREEN_WAVE", duration, travelTimeOffsetMs);
     }
 
-    /**
-     * Emite diretiva de equilíbrio adaptativo para um cruzamento específico.
-     */
     public synchronized void emitirPoliticaEquilibrio(int intersectionIdx, int targetAxis, long durationMs) {
         long seq = commandSeq.incrementAndGet();
         String cmdId = "CMD_BAL_" + seq;
         enviarComandoCoordenação(intersectionIdx, targetAxis, cmdId, "BALANCED", durationMs, 0);
     }
 
-    /**
-     * Despacha uma mensagem FIPA-ACL REQUEST com a diretiva de coordenação para os semáforos competentes.
-     */
     public synchronized void enviarComandoCoordenação(int intersectionIdx, int targetAxis, 
                                                       String cmdId, String policyType, 
                                                       long plannedDurationMs, long offsetMs) {
-        // Regista o comando na auditoria
         CoordinatedCommandRecord record = new CoordinatedCommandRecord(cmdId, policyType, intersectionIdx, 
                                                                        targetAxis, plannedDurationMs, offsetMs);
         commandRecords.put(cmdId, record);
         commandHistory.add(cmdId);
-        metrics.TrafficMetricsCollector.getInstance().recordCoordinationIssued(cmdId, intersectionIdx, policyType, plannedDurationMs);
+        TrafficMetricsCollector.getInstance().recordCoordinationIssued(cmdId, intersectionIdx, policyType, plannedDurationMs);
 
-        String crossingName = CROSSINGS[intersectionIdx];
+        String crossingName = resolveCrossingName(intersectionIdx);
         String axisPrefix = (targetAxis == 0) ? "NS" : "EW";
         String targetAgentName = "Semaforo_" + axisPrefix + "_" + crossingName;
 
@@ -298,7 +284,7 @@ public class CentralCoordinationAgent extends Agent {
         request.setOntology("coordination-policy");
         request.setConversationId("coord-req-" + cmdId);
 
-        long validUntil = environment.SimulationClock.currentTimeMillis() + 10000; // Validade de 10 segundos
+        long validUntil = environment.SimulationClock.currentTimeMillis() + 10000;
         request.setContent("POLICY;cmdId=" + cmdId 
                 + ";policyType=" + policyType 
                 + ";targetAxis=" + targetAxis 
@@ -312,20 +298,14 @@ public class CentralCoordinationAgent extends Agent {
         safeSend(request);
     }
 
-    /**
-     * Envia mensagem de forma segura tolerando testes unitários sem container JADE ativo.
-     */
     private void safeSend(ACLMessage msg) {
         try {
             send(msg);
+            TrafficMetricsCollector.getInstance().recordFipaMessage();
         } catch (Throwable ignored) {
-            // Em testes unitários isolados onde o agente não está anexado a um container JADE ativo
         }
     }
 
-    /**
-     * Cria um AID com tolerância a execuções fora de container JADE ativo.
-     */
     private AID createAID(String name) {
         try {
             return new AID(name, AID.ISLOCALNAME);
@@ -334,46 +314,37 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    /**
-     * Processa mensagens FIPA-ACL recebidas dos agentes semáforo.
-     */
     private void processarMensagemFIPA(ACLMessage msg) {
         String ontology = msg.getOntology();
 
-        // 1. Telemetria periódica dos semáforos (INFORM)
         if ("traffic-status".equalsIgnoreCase(ontology)) {
             tratarMensagemStatus(msg);
             return;
         }
 
-        // 2. Confirmações e Aplicações de Diretivas de Coordenação
         if ("coordination-policy".equalsIgnoreCase(ontology)) {
             tratarMensagemCoordenacao(msg);
             return;
         }
 
-        // 3. Alertas de perturbações externas (legado)
         if ("disruption-alert".equalsIgnoreCase(ontology)) {
             System.out.println("[CentralCoordinationAgent] Alerta de perturbação externa recebido: " + msg.getContent());
         }
 
-        // 4. Alertas de perturbações baseadas em ML (Fase 4 - Etapa 4: DISTURBANCE_ALERT)
         if ("DISTURBANCE_ALERT".equalsIgnoreCase(ontology)) {
             tratarAlertaMLDisturbance(msg);
         }
     }
 
-    /**
-     * Trata o reporte de estado recebido de um cruzamento.
-     */
     private void tratarMensagemStatus(ACLMessage msg) {
         String content = msg.getContent();
         Map<String, String> params = parseParameters(content);
 
         try {
             int idx = Integer.parseInt(params.getOrDefault("intersection", "-1"));
-            if (idx >= 0 && idx < 4) {
-                IntersectionTelemetry tel = telemetryMap.get(idx);
+            int maxInter = NetworkTopologyConfig.getActive().getIntersectionCount();
+            if (idx >= 0 && idx < maxInter) {
+                IntersectionTelemetry tel = telemetryMap.computeIfAbsent(idx, IntersectionTelemetry::new);
                 tel.waitingNS = Integer.parseInt(params.getOrDefault("waitingNS", "0"));
                 tel.waitingEW = Integer.parseInt(params.getOrDefault("waitingEW", "0"));
                 tel.currentPhase = params.getOrDefault("phase", "NS_GREEN");
@@ -386,9 +357,6 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    /**
-     * Trata confirmações (AGREE / REFUSE) e notificações de aplicação (INFORM: APPLIED).
-     */
     private void tratarMensagemCoordenacao(ACLMessage msg) {
         String content = msg.getContent();
         Map<String, String> params = parseParameters(content);
@@ -426,9 +394,6 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    /**
-     * Parser utilitário de parâmetros no formato chave=valor separados por ponto-e-vírgula.
-     */
     private Map<String, String> parseParameters(String content) {
         Map<String, String> map = new java.util.HashMap<>();
         if (content == null) return map;
@@ -442,37 +407,14 @@ public class CentralCoordinationAgent extends Agent {
         return map;
     }
 
-    /**
-     * Trata alertas DISTURBANCE_ALERT emitidos pelo DisruptionManagementAgent com modelo ML.
-     *
-     * Conteúdo esperado (chave=valor; separado por ponto-e-vírgula):
-     *   type=ML_PREDICTION;intersection=<idx>;probability=<p>;predicted=1;
-     *   speedMultiplier=<mult>;horizon=<horizon_s>;model=<name>;threshold=<tau>
-     *
-     * Ações:
-     * 1. Parsing e registo do alerta.
-     * 2. Log estruturado com cruzamento, probabilidade e ações recomendadas.
-     * 3. Resposta AGREE confirmando receção.
-     */
-    /**
-     * Trata alertas DISTURBANCE_ALERT emitidos pelo DisruptionManagementAgent com modelo ML.
-     *
-     * Validações obrigatórias (Secção 5 e 7):
-     * 1. Cruzamento válido no intervalo [0, 3].
-     * 2. Probabilidade válida no intervalo [0.0, 1.0].
-     * 3. Alerta não expirado (validUntil >= agora).
-     * 4. Precedência de emergências sobre coordenação preditiva (Secção 8).
-     * 5. Resposta AGREE com confirmação ou REFUSE com motivo em caso de rejeição.
-     * 6. Despacho de diretiva de coordenação adaptativa quando P >= threshold.
-     */
     private void tratarAlertaMLDisturbance(ACLMessage msg) {
         String content = msg.getContent();
         Map<String, String> params = parseParameters(content);
 
         try {
             int intersection = Integer.parseInt(params.getOrDefault("intersection", "-1"));
-            // 1. Validação do Cruzamento
-            if (intersection < 0 || intersection >= 4) {
+            int maxIntersections = NetworkTopologyConfig.getActive().getIntersectionCount();
+            if (intersection < 0 || intersection >= maxIntersections) {
                 System.err.println("[CentralCoordinationAgent] Alerta ML rejeitado: cruzamento inválido (" + intersection + ")");
                 ACLMessage refReply = msg.createReply();
                 refReply.setPerformative(ACLMessage.REFUSE);
@@ -482,7 +424,6 @@ public class CentralCoordinationAgent extends Agent {
                 return;
             }
 
-            // 2. Validação da Probabilidade
             double probability = Double.parseDouble(params.getOrDefault("probability", "0.0"));
             if (probability < 0.0 || probability > 1.0) {
                 System.err.println("[CentralCoordinationAgent] Alerta ML rejeitado: probabilidade fora dos limites [0, 1]: " + probability);
@@ -494,7 +435,6 @@ public class CentralCoordinationAgent extends Agent {
                 return;
             }
 
-            // 3. Validação de Expiração
             long validUntil = Long.parseLong(params.getOrDefault("validUntil", "0"));
             long now = environment.SimulationClock.currentTimeMillis();
             if (validUntil > 0 && validUntil < now) {
@@ -514,18 +454,17 @@ public class CentralCoordinationAgent extends Agent {
             double horizon = Double.parseDouble(params.getOrDefault("horizon", "60"));
             String riskType = params.getOrDefault("riskType", "CONGESTION_RISK");
 
-            // Atualiza estado interno de telemetria ML
             lastMLAlertId = alertId;
             lastMLAlertIntersection = intersection;
             lastMLAlertProbability = probability;
             lastMLAlertSpeedMultiplier = speedMult;
             lastMLAlertReceivedMs = now;
             mlAlertCount++;
-            metrics.TrafficMetricsCollector.getInstance().recordMLAlert(alertId, intersection, probability, riskType);
+            TrafficMetricsCollector.getInstance().recordMLAlert(alertId, intersection, probability, riskType);
 
             int probPercent = (int) Math.round(probability * 100);
             String nivel = (probPercent >= 70) ? "CRÍTICO" : ((probPercent >= 40) ? "MODERADO" : "BAIXO");
-            String crossingName = CROSSINGS[intersection];
+            String crossingName = resolveCrossingName(intersection);
 
             System.out.println("\n[CentralCoordinationAgent] >>> DISTURBANCE_ALERT ML RECEBIDO <<<");
             System.out.println("  • Alerta ID: " + alertId);
@@ -537,14 +476,12 @@ public class CentralCoordinationAgent extends Agent {
             System.out.println("  • Multiplicador Vel.: " + (int)(speedMult * 100) + "%");
             System.out.println("  • Total de alertas ML recebidos: " + mlAlertCount + "\n");
 
-            // Confirmação de receção com AGREE
             ACLMessage reply = msg.createReply();
             reply.setPerformative(ACLMessage.AGREE);
             reply.setOntology("DISTURBANCE_ALERT");
             reply.setContent("AGREE;alertId=" + alertId + ";intersection=" + intersection + ";probability=" + probability);
             safeSend(reply);
 
-            // Resposta de coordenação adaptativa preditiva (Secção 7 e 8)
             if (probability >= threshold) {
                 IntersectionTelemetry tel = telemetryMap.get(intersection);
                 if (tel != null && tel.hasEmergency) {
@@ -569,10 +506,6 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
-    /* =========================================================================
-     * MÉTODOS DE CONSULTA E AUDITORIA PARA VALIDAÇÃO E SUITES DE TESTES
-     * ========================================================================= */
-
     public Map<Integer, IntersectionTelemetry> getTelemetryMap() {
         return telemetryMap;
     }
@@ -594,71 +527,57 @@ public class CentralCoordinationAgent extends Agent {
         return lastAdherenceByIntersection.containsKey(intersectionIndex);
     }
 
-    // ======================== CONSULTAS ML (Fase 4 - Etapa 4) ========================
-
-    /** Devolve o ID do último alerta ML recebido. */
     public String getLastMLAlertId() {
         return lastMLAlertId;
     }
 
-    /** Devolve o ID da última diretiva adaptativa preditiva emitida pelo coordenador. */
     public String getLastAdaptiveCommandId() {
         return lastAdaptiveCommandId;
     }
 
-    /** Devolve o índice do cruzamento do último alerta ML recebido. */
     public int getLastMLAlertIntersection() {
         return lastMLAlertIntersection;
     }
 
-    /** Devolve a probabilidade do último alerta ML recebido. */
     public double getLastMLAlertProbability() {
         return lastMLAlertProbability;
     }
 
-    /** Devolve o multiplicador de velocidade do último alerta ML recebido. */
     public double getLastMLAlertSpeedMultiplier() {
         return lastMLAlertSpeedMultiplier;
     }
 
-    /** Devolve o timestamp de receção do último alerta ML. */
     public long getLastMLAlertReceivedMs() {
         return lastMLAlertReceivedMs;
     }
 
-    /** Devolve o total de alertas ML recebidos. */
     public int getMLAlertCount() {
         return mlAlertCount;
     }
 
-    /** Devolve o estado de execução de um comando coordenado pelo seu ID. */
     public String getCommandStatus(String cmdId) {
         if (cmdId == null) return "UNKNOWN";
         CoordinatedCommandRecord r = commandRecords.get(cmdId);
         return (r != null) ? r.status : "NOT_FOUND";
     }
 
-    /** Devolve se o comando coordenado foi efetivamente aplicado no cruzamento. */
     public boolean isCommandApplied(String cmdId) {
         if (cmdId == null) return false;
         CoordinatedCommandRecord r = commandRecords.get(cmdId);
         return (r != null) && (r.wasApplied || "APPLIED".equals(r.status) || "APPLIED_THEN_PREEMPTED".equals(r.status));
     }
 
-    /** Devolve o registo completo de auditoria de um comando pelo seu ID. */
     public CoordinatedCommandRecord getCommandRecord(String cmdId) {
         return (cmdId != null) ? commandRecords.get(cmdId) : null;
     }
 
-    /**
-     * Dispara um ciclo determinístico de coordenação macro sincronizado com o relógio simulado (Fase 5 - Etapa 2).
-     */
     public synchronized void triggerScheduledCoordination() {
         auditarRedeETomarDecisoes();
     }
 
     @Override
     protected void takeDown() {
+        FleetLifecycleManager.getInstance().unregisterLiveJadeAgent(getLocalName());
         if (activeInstance == this) {
             activeInstance = null;
         }
