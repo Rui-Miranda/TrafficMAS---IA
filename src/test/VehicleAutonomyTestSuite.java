@@ -96,10 +96,14 @@ public class VehicleAutonomyTestSuite {
         System.out.printf("RESUMO FASE 6.2-D: %d aprovados | %d falhados (Total: %d)%n", passed, failed, (passed + failed));
         System.out.println("==================================================================================");
 
+        cleanupSharedContainer();
+        VehicleControlGateway.getInstance().clear();
+        FleetLifecycleManager.getInstance().reset();
+
         if (failed > 0) {
-            java.lang.Runtime.getRuntime().halt(1);
+            System.exit(1);
         } else {
-            java.lang.Runtime.getRuntime().halt(0);
+            System.exit(0);
         }
     }
 

@@ -26,7 +26,7 @@ public class VehicleControlGateway {
     }
 
     /** Tempo máximo de validade de uma decisão antes de ser considerada obsoleta (ms) */
-    public static final long DEFAULT_MAX_STALENESS_MS = 600L;
+    public static final long DEFAULT_MAX_STALENESS_MS = 1200L;
 
     // Registo de agentes JADE ativos
     private final Map<String, Agent> registeredAgents = new ConcurrentHashMap<>();

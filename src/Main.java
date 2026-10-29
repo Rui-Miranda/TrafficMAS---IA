@@ -252,7 +252,14 @@ public class Main {
         int cpuSamples = 0;
 
         for (int s = 1; s <= seconds; s++) {
-            Thread.sleep(1000);
+            if (gui != null && java.awt.GraphicsEnvironment.isHeadless()) {
+                for (int step = 0; step < 30; step++) {
+                    gui.stepSimulationOnce();
+                    Thread.sleep(33);
+                }
+            } else {
+                Thread.sleep(1000);
+            }
             if (gui != null) {
                 int fps = gui.getDisplayedFps();
                 if (fps > 0) {

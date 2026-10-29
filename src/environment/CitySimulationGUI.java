@@ -242,7 +242,7 @@ public class CitySimulationGUI {
             windowFrame.setLocationRelativeTo(null);
             windowFrame.setResizable(true);
 
-            // Loop de simulação a ~30 FPS
+            // Loop de simulação a ~30 FPS (ativo em modo gráfico)
             simulationTimer = new Timer(30, e -> {
                 tickCounter++;
                 int interCount = topology.getIntersectionCount();
@@ -269,6 +269,34 @@ public class CitySimulationGUI {
                 cityPanel.repaint();
             });
             simulationTimer.start();
+        }
+    }
+
+    /**
+     * Avança um único ciclo de física e controlo (útil para execuções headless ou demonstrações controladas).
+     */
+    public void stepSimulationOnce() {
+        tickCounter++;
+        int interCount = topology.getIntersectionCount();
+        metrics.TrafficMetricsCollector.getInstance().advanceSimulatedTime(0.03333333333333333);
+        if (!SimulationClock.isSimulatedMode()) {
+            for (int i = 0; i < interCount; i++) {
+                IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
+                auth.updateTick(getWaitingCount(i, 0), getWaitingCount(i, 1));
+                lights[i][0] = auth.getLightState(0);
+                lights[i][1] = auth.getLightState(1);
+            }
+        }
+        if (tickCounter % 30 == 0) {
+            for (int i = 0; i < interCount; i++) {
+                metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 0, getWaitingCount(i, 0));
+                metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 1, getWaitingCount(i, 1));
+            }
+        }
+        calculateFps();
+        updatePositions();
+        if (cityPanel != null) {
+            cityPanel.repaint();
         }
     }
 
