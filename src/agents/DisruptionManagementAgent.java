@@ -147,6 +147,16 @@ public class DisruptionManagementAgent extends Agent {
         NetworkTopologyConfig topo = env.getTopology();
         int n = topo.getIntersectionCount();
 
+        // Proteção de Validade Científica (Fase 6.2-D):
+        // O modelo foi treinado exclusivamente na topologia 2×2 (4 cruzamentos).
+        // Em malha 3×3 (9 cruzamentos), a atuação operacional preditiva é desativada
+        // explicitamente para evitar extrapolação não validada, preservando os artefactos históricos.
+        if (n > 4 || topo.getRows() == 3) {
+            env.setMLPredictionNotice("ML Preditivo: Validação 3x3 Pendente (Modelo 2x2 Preservado)");
+            System.out.println("[DisruptionManagementAgent - ML] Atuação operacional ML suspensa na malha 3x3: Validação pendente (Modelo 2x2 histórico preservado).");
+            return;
+        }
+
         double maxProbability = 0.0;
         int maxProbIntersection = -1;
         int maxPredClass = 0;

@@ -1,13 +1,13 @@
-# Script PowerShell para Execucao das Suites de Testes do TrafficMAS (Fases 1 a 6.2)
+# Script PowerShell para Execucao das Suites de Testes do TrafficMAS (Fases 1 a 6.2-D)
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "   TRAFFICMAS -- EXECUCAO DAS SUITES DE TESTES AUTOMATIZADOS (FASES 1 A 6.2)" -ForegroundColor Cyan
+Write-Host "   TRAFFICMAS -- EXECUCAO DAS SUITES DE TESTES AUTOMATIZADOS (FASES 1 A 6.2-D)" -ForegroundColor Cyan
 Write-Host "================================================================================`n" -ForegroundColor Cyan
 
 if (-not (Test-Path "bin")) {
     New-Item -ItemType Directory -Path "bin" | Out-Null
 }
 
-Write-Host "[1/14] A compilar fontes e testes..." -ForegroundColor Yellow
+Write-Host "[1/15] A compilar fontes e testes..." -ForegroundColor Yellow
 javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 if ($LASTEXITCODE -ne 0) {
@@ -15,7 +15,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "[2/14] A executar suite de testes de seguranca (Fase 1)..." -ForegroundColor Green
+Write-Host "[2/15] A executar suite de testes de seguranca (Fase 1)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SafetyTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -24,7 +24,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[3/14] A executar suite de testes dos veiculos (Fase 2)..." -ForegroundColor Green
+Write-Host "[3/15] A executar suite de testes dos veiculos (Fase 2)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.VehicleTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -33,7 +33,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[4/14] A executar suite de testes de coordenacao (Fase 3)..." -ForegroundColor Green
+Write-Host "[4/15] A executar suite de testes de coordenacao (Fase 3)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.CoordinationTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -42,7 +42,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[5/14] A executar suite de validacao do dataset de ML (Fase 4 - Etapa 1)..." -ForegroundColor Green
+Write-Host "[5/15] A executar suite de validacao do dataset de ML (Fase 4 - Etapa 1)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.DatasetValidationTest
 
 if ($LASTEXITCODE -ne 0) {
@@ -51,7 +51,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[6/14] A executar suite de testes dos modelos de ML (Fase 4 - Etapa 2)..." -ForegroundColor Green
+Write-Host "[6/15] A executar suite de testes dos modelos de ML (Fase 4 - Etapa 2)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MachineLearningModelTest
 
 if ($LASTEXITCODE -ne 0) {
@@ -60,7 +60,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[7/14] A executar suite de testes de selecao e persistencia (Fase 4 - Etapa 3)..." -ForegroundColor Green
+Write-Host "[7/15] A executar suite de testes de selecao e persistencia (Fase 4 - Etapa 3)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.ModelSelectionAndPersistenceTest
 
 if ($LASTEXITCODE -ne 0) {
@@ -69,7 +69,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[8/14] A executar suite de integracao ML-Agente (Fase 4 - Etapa 4)..." -ForegroundColor Green
+Write-Host "[8/15] A executar suite de integracao ML-Agente (Fase 4 - Etapa 4)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.MLAgentIntegrationTest
 
 if ($LASTEXITCODE -ne 0) {
@@ -78,7 +78,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[9/14] A executar suite de metricas e exportacao (Fase 5 - Etapa 1)..." -ForegroundColor Green
+Write-Host "[9/15] A executar suite de metricas e exportacao (Fase 5 - Etapa 1)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficMetricsTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -87,7 +87,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[10/14] A executar teste de integracao controlada de metricas (Fase 5 - Etapa 1)..." -ForegroundColor Green
+Write-Host "[10/15] A executar teste de integracao controlada de metricas (Fase 5 - Etapa 1)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.ControlledSimulationIntegrationTest
 
 if ($LASTEXITCODE -ne 0) {
@@ -99,7 +99,7 @@ if ($LASTEXITCODE -ne 0) {
 git checkout -- results/run_summary.csv results/intersection_metrics.csv 2>$null
 
 Write-Host ""
-Write-Host "[11/14] A executar suite de validacao do SimulationClock (Fase 5 - Checkpoint B)..." -ForegroundColor Green
+Write-Host "[11/15] A executar suite de validacao do SimulationClock (Fase 5 - Checkpoint B)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.SimulationClockValidationTest
 
 if ($LASTEXITCODE -ne 0) {
@@ -108,7 +108,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[12/14] A executar suite de infraestrutura experimental e piloto (Fase 5 - Etapa 2)..." -ForegroundColor Green
+Write-Host "[12/15] A executar suite de infraestrutura experimental e piloto (Fase 5 - Etapa 2)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.TrafficExperimentTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -117,7 +117,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[13/14] A executar suite de validacao da Fase 6.1 (Malha 3x3, A*, Manhattan, 73 Agentes)..." -ForegroundColor Green
+Write-Host "[13/15] A executar suite de validacao da Fase 6.1 (Malha 3x3, A*, Manhattan, 73 Agentes)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase61ValidationTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -126,7 +126,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[14/14] A executar suite de validacao da Fase 6.2 (Gestao Interativa 50 Veiculos e Controlo Manual Seguro)..." -ForegroundColor Green
+Write-Host "[14/15] A executar suite de validacao da Fase 6.2 (Gestao Interativa 50 Veiculos e Controlo Manual Seguro)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase62ValidationTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -135,6 +135,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
+Write-Host "[15/15] A executar suite de autonomia operacional dos agentes veiculo (Fase 6.2-D)..." -ForegroundColor Green
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.VehicleAutonomyTestSuite
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERRO] Testes de Autonomia Operacional dos Veiculos (Fase 6.2-D) falharam!" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+Write-Host ""
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "   TODAS AS 13 SUITES DE TESTES (158 TESTES - FASES 1 A 6.2) FORAM CONCLUIDAS!" -ForegroundColor Green
+Write-Host "   TODAS AS 14 SUITES DE TESTES (173 TESTES - FASES 1 A 6.2-D) FORAM CONCLUIDAS!" -ForegroundColor Green
 Write-Host "================================================================================" -ForegroundColor Cyan

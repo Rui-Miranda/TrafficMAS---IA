@@ -105,6 +105,7 @@ public final class FleetLifecycleManager {
         infrastructureControllers.clear();
         liveJadeAgentsByType.clear();
         sequenceCounter.set(0);
+        VehicleControlGateway.getInstance().clear();
     }
 
     /* =========================================================================
@@ -156,6 +157,10 @@ public final class FleetLifecycleManager {
      */
     public int getActiveNormalVehicleCount() {
         return normalControllers.size();
+    }
+
+    public int getNormalVehicleCount() {
+        return getActiveNormalVehicleCount();
     }
 
     /**
@@ -293,6 +298,7 @@ public final class FleetLifecycleManager {
         }
 
         liveJadeAgentsByType.remove(vehicleId);
+        VehicleControlGateway.getInstance().unregisterAgent(vehicleId);
 
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         if (gui != null) {

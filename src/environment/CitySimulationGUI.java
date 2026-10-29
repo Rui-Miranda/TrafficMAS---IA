@@ -192,6 +192,20 @@ public class CitySimulationGUI {
     });
     private volatile Future<?> lastPendingGuiTask = null;
 
+    /**
+     * Flag de exigência estrita de autonomia: se {@code true}, viaturas normais
+     * só se deslocam sob controlo de um VehicleAgent ativo via VehicleControlGateway.
+     */
+    private volatile boolean requireAgentAutonomy = false;
+
+    public void setRequireAgentAutonomy(boolean require) {
+        this.requireAgentAutonomy = require;
+    }
+
+    public boolean isRequireAgentAutonomy() {
+        return requireAgentAutonomy;
+    }
+
     public CitySimulationGUI() {
         this(java.awt.GraphicsEnvironment.isHeadless());
     }
@@ -750,6 +764,7 @@ public class CitySimulationGUI {
      */
     public synchronized boolean removeVehicle(String vehicleId) {
         if (vehicleId == null) return false;
+        VehicleControlGateway.getInstance().unregisterAgent(vehicleId);
         boolean removed = vehicles.removeIf(v -> vehicleId.equals(v.id));
         if (removed) {
             refreshFleetControlState();
@@ -763,6 +778,7 @@ public class CitySimulationGUI {
     public synchronized void clearVehicles() {
         vehicles.clear();
         spawnSequence.set(0);
+        VehicleControlGateway.getInstance().clear();
         refreshFleetControlState();
     }
 
@@ -1556,64 +1572,151 @@ public class CitySimulationGUI {
                         lights[nextIntersectionIdx][0], lights[nextIntersectionIdx][1]);
             }
 
-            // 4. Atualizar intenção de manobra segundo a rota A* (recalculando apenas se o grafo mudou ou chegou ao destino)
-            if (distToStopLine > 0.0 && distToStopLine <= 240.0 && nextIntersectionIdx >= 0) {
-                ensureValidAStarIntentForApproach(v, nextIntersectionIdx);
-            }
-
-            // 5. Adaptação preventiva de faixa para coincidir com a manobra planeada pelo A* (fora da zona de travagem)
-            if (distToStopLine > 68.0 && distToStopLine < 230.0) {
-                alignVehicleLaneWithIntent(v, top);
-            }
-
-            // 6. Deteção de Veículo da Frente na Mesma Faixa (Fila de Espera Anti-Colisão)
+            // 4. Publicação da Perceção Sensorial no Gateway para o VehicleAgent
+            VisualVehicle leaderObj = getLeadingVehicleObject(v);
             double distToLeader = getDistanceToLeadingVehicle(v);
-            boolean blockedByLeader = (distToLeader < 38.0);
+            double leaderSpeed = (leaderObj != null) ? leaderObj.currentSpeed : -1.0;
 
-            // 7. Decisão Estrita de Travagem por Semáforo ou Fila (Zero Atravessamentos no Vermelho)
+            VehiclePerception perception = new VehiclePerception(
+                    v.id, v.x, v.y, v.currentSpeed, v.maxSpeed, v.direction, v.laneIndex,
+                    v.inIntersection, nextIntersectionIdx, distToStopLine, nextLight,
+                    distToLeader, leaderSpeed, roadGraph.getGraphVersion(), globalSpeedMultiplier,
+                    System.currentTimeMillis(), tickCounter);
+            VehicleControlGateway.getInstance().publishPerception(v.id, perception);
+
+            // 5. Deliberação Autónoma do VehicleAgent vs. Paragem Controlada vs. Fallback Legacy
+            boolean hasAgent = VehicleControlGateway.getInstance().isAgentRegistered(v.id);
+            boolean blockedByLeader = (distToLeader < 38.0);
             boolean approachingStopLine = (distToStopLine >= 0.0 && distToStopLine <= 65.0);
             boolean signalNotGreen = (nextLight != LightState.GREEN);
-            boolean shouldBrakeForSignal = approachingStopLine && signalNotGreen;
-            boolean shouldBrake = blockedByLeader || shouldBrakeForSignal;
 
-            if (shouldBrake) {
+            if (hasAgent) {
+                VehicleDecision decision = VehicleControlGateway.getInstance().getValidDecision(
+                        v.id, System.currentTimeMillis(), VehicleControlGateway.DEFAULT_MAX_STALENESS_MS);
+
+                if (decision == null) {
+                    // Agente suspenso, sem decisão válida ou inativo -> Paragem Controlada Segura (STOP)
+                    v.isBraking = true;
+                    v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.20);
+                    if (v.currentSpeed == 0.0) v.wasStopped = true;
+                    handleBoundaryWrapAround(v, top);
+                    continue;
+                } else {
+                    // Executa a decisão autónoma emitida pelo VehicleAgent
+                    v.intent = decision.getPlannedIntent();
+                    v.destinationIntersectionId = decision.getDestinationNode();
+                    v.originIntersectionId = decision.getOriginNode();
+
+                    // Ajusta a faixa caso a decisão planeie uma viragem diferente
+                    if (distToStopLine > 68.0 && distToStopLine < 230.0 && decision.getDesiredLane() != v.laneIndex) {
+                        alignVehicleLaneWithDesired(v, top, decision.getDesiredLane());
+                    }
+
+                    if (decision.getAction() == VehicleAction.BRAKE || decision.getAction() == VehicleAction.STOP) {
+                        v.isBraking = true;
+                        double targetSpeed = decision.getTargetSpeed();
+                        v.currentSpeed = Math.max(0.0, Math.min(v.currentSpeed - 0.16, targetSpeed));
+                        if (v.currentSpeed == 0.0) {
+                            v.wasStopped = true;
+                            v.currentCrossingWaitSeconds += 0.03333333333333333;
+                            if (v.currentStopStartMillis == 0) {
+                                v.currentStopStartMillis = System.currentTimeMillis();
+                            }
+                        }
+                    } else {
+                        v.isBraking = false;
+                        if (v.currentStopStartMillis > 0) {
+                            v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
+                            v.currentStopStartMillis = 0;
+                        }
+                        double targetSpeed = Math.min(decision.getTargetSpeed(), v.maxSpeed * globalSpeedMultiplier);
+                        if (v.wasStopped) {
+                            if (v.startDelayTicks < 10) {
+                                v.startDelayTicks++;
+                                v.currentSpeed = 0.0;
+                            } else {
+                                v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.08);
+                                if (v.currentSpeed >= targetSpeed * 0.8) {
+                                    v.wasStopped = false;
+                                    v.startDelayTicks = 0;
+                                }
+                            }
+                        } else {
+                            v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.06);
+                        }
+                    }
+                }
+            } else if (requireAgentAutonomy && !v.isEmergency) {
+                // Autonomia exigida mas sem agente registado -> paragem controlada
                 v.isBraking = true;
-                double limitDist = blockedByLeader
-                        ? (shouldBrakeForSignal ? Math.min(distToLeader - 32.0, distToStopLine) : (distToLeader - 32.0))
-                        : distToStopLine;
+                v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.20);
+                if (v.currentSpeed == 0.0) v.wasStopped = true;
+                handleBoundaryWrapAround(v, top);
+                continue;
+            } else {
+                // Fallback para viaturas de emergência ou testes unitários sem contentor JADE
+                if (distToStopLine > 0.0 && distToStopLine <= 240.0 && nextIntersectionIdx >= 0) {
+                    ensureValidAStarIntentForApproach(v, nextIntersectionIdx);
+                }
+                if (distToStopLine > 68.0 && distToStopLine < 230.0) {
+                    alignVehicleLaneWithIntent(v, top);
+                }
+                boolean shouldBrakeForSignal = approachingStopLine && signalNotGreen;
+                boolean shouldBrake = blockedByLeader || shouldBrakeForSignal;
 
+                if (shouldBrake) {
+                    v.isBraking = true;
+                    double limitDist = blockedByLeader
+                            ? (shouldBrakeForSignal ? Math.min(distToLeader - 32.0, distToStopLine) : (distToLeader - 32.0))
+                            : distToStopLine;
+
+                    if (limitDist <= 3.0) {
+                        v.currentSpeed = 0.0;
+                        v.wasStopped = true;
+                        v.currentCrossingWaitSeconds += 0.03333333333333333;
+                        if (v.currentStopStartMillis == 0) {
+                            v.currentStopStartMillis = System.currentTimeMillis();
+                        }
+                    } else {
+                        double targetSpeed = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * globalSpeedMultiplier));
+                        v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.16);
+                        if (v.currentSpeed > targetSpeed) v.currentSpeed = targetSpeed;
+                    }
+                } else {
+                    v.isBraking = false;
+                    if (v.currentStopStartMillis > 0) {
+                        v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
+                        v.currentStopStartMillis = 0;
+                    }
+                    double effectiveMaxSpeed = v.maxSpeed * globalSpeedMultiplier;
+                    if (v.wasStopped) {
+                        if (v.startDelayTicks < 10) {
+                            v.startDelayTicks++;
+                            v.currentSpeed = 0.0;
+                        } else {
+                            v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.08);
+                            if (v.currentSpeed >= effectiveMaxSpeed * 0.8) {
+                                v.wasStopped = false;
+                                v.startDelayTicks = 0;
+                            }
+                        }
+                    } else {
+                        v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.06);
+                    }
+                }
+            }
+
+            // 6. Invariante Físico de Segurança Absoluta (Anti-Colisão e Paragem no Vermelho)
+            if (blockedByLeader || (approachingStopLine && signalNotGreen)) {
+                double limitDist = blockedByLeader
+                        ? ((approachingStopLine && signalNotGreen) ? Math.min(distToLeader - 32.0, distToStopLine) : (distToLeader - 32.0))
+                        : distToStopLine;
                 if (limitDist <= 3.0) {
                     v.currentSpeed = 0.0;
                     v.wasStopped = true;
-                    v.currentCrossingWaitSeconds += 0.03333333333333333;
-                    if (v.currentStopStartMillis == 0) {
-                        v.currentStopStartMillis = System.currentTimeMillis();
-                    }
                 } else {
-                    double targetSpeed = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * globalSpeedMultiplier));
-                    v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.16);
-                    if (v.currentSpeed > targetSpeed) v.currentSpeed = targetSpeed;
-                }
-            } else {
-                v.isBraking = false;
-                if (v.currentStopStartMillis > 0) {
-                    v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
-                    v.currentStopStartMillis = 0;
-                }
-                double effectiveMaxSpeed = v.maxSpeed * globalSpeedMultiplier;
-                if (v.wasStopped) {
-                    if (v.startDelayTicks < 10) {
-                        v.startDelayTicks++;
-                        v.currentSpeed = 0.0;
-                    } else {
-                        v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.08);
-                        if (v.currentSpeed >= effectiveMaxSpeed * 0.8) {
-                            v.wasStopped = false;
-                            v.startDelayTicks = 0;
-                        }
-                    }
-                } else {
-                    v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.06);
+                    double safeCap = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * globalSpeedMultiplier));
+                    if (v.currentSpeed > safeCap) v.currentSpeed = safeCap;
                 }
             }
 
@@ -1696,8 +1799,7 @@ public class CitySimulationGUI {
         }
     }
 
-    private void alignVehicleLaneWithIntent(VisualVehicle v, NetworkTopologyConfig top) {
-        int desiredLane = (v.intent == ManeuverIntent.TURN_RIGHT) ? 0 : 1;
+    private void alignVehicleLaneWithDesired(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
         if (v.laneIndex == desiredLane) return;
 
         int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
@@ -1714,6 +1816,11 @@ public class CitySimulationGUI {
         v.x = candX;
         v.y = candY;
         v.laneIndex = desiredLane;
+    }
+
+    private void alignVehicleLaneWithIntent(VisualVehicle v, NetworkTopologyConfig top) {
+        int desiredLane = (v.intent == ManeuverIntent.TURN_RIGHT) ? 0 : 1;
+        alignVehicleLaneWithDesired(v, top, desiredLane);
     }
 
     private boolean isIntersectionExitBlocked(VisualVehicle v, int interIdx, NetworkTopologyConfig top) {
@@ -1849,6 +1956,41 @@ public class CitySimulationGUI {
             if (d < minDist) minDist = d;
         }
         return minDist;
+    }
+
+    private VisualVehicle getLeadingVehicleObject(VisualVehicle v) {
+        VisualVehicle leading = null;
+        double minDist = 9999.0;
+        for (VisualVehicle other : vehicles) {
+            if (other == v || other.direction != v.direction) continue;
+
+            if (v.direction == 0 || v.direction == 1) {
+                if (Math.abs(other.x - v.x) > 14.0) continue;
+            } else {
+                if (Math.abs(other.y - v.y) > 14.0) continue;
+            }
+
+            double d = 9999.0;
+            switch (v.direction) {
+                case 0: // N->S
+                    if (other.y > v.y) d = other.y - v.y;
+                    break;
+                case 1: // S->N
+                    if (other.y < v.y) d = v.y - other.y;
+                    break;
+                case 2: // W->E
+                    if (other.x > v.x) d = other.x - v.x;
+                    break;
+                case 3: // E->W
+                    if (other.x < v.x) d = v.x - other.x;
+                    break;
+            }
+            if (d < minDist) {
+                minDist = d;
+                leading = other;
+            }
+        }
+        return leading;
     }
 
     private void initiateIntersectionTurn(VisualVehicle v, int interIdx) {

@@ -243,6 +243,11 @@ public class TrafficEnvironment {
         }
     }
 
+    public String getMLPredictionNotice() {
+        CitySimulationGUI gui = CitySimulationGUI.peekInstance();
+        return (gui != null) ? gui.getMLPredictionNotice() : "";
+    }
+
     public double getEnvironmentalSpeedMultiplier() {
         if (customDataProvider != null) {
             return customDataProvider.getGlobalSpeedMultiplier();
