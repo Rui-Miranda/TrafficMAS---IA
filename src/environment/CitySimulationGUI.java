@@ -1,14 +1,24 @@
 package environment;
 
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.geom.AffineTransform;
 import java.awt.geom.RoundRectangle2D;
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.imageio.ImageIO;
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
 
 /**
  * Interface Gráfica Urbana Parametrizável (2×2 e 3×3) com Navegação A* e Cinemática Contínua (Fase 6.1).
@@ -102,7 +112,7 @@ public class CitySimulationGUI {
         }
     }
 
-    private static CitySimulationGUI instance;
+    private static volatile CitySimulationGUI instance;
 
     // Constantes públicas legadas mantidas para compatibilidade retroativa (Modo 2×2)
     public static final int ROAD_WIDTH = NetworkTopologyConfig.DEFAULT_ROAD_WIDTH; // 96px
@@ -144,7 +154,43 @@ public class CitySimulationGUI {
     private String mlPredictionNotice = "ML Preditivo: Operacional";
     private JFrame windowFrame;
     private CityPanel cityPanel;
+    private JPanel controlBarPanel;
     private Timer simulationTimer;
+
+    // =========================================================================
+    // FASE 6.2 — PAINEL INTERATIVO DE GESTÃO DA FROTA (50 NORMAIS + PRIORITÁRIOS)
+    // =========================================================================
+    public static final int CONTROL_BAR_HEIGHT = 86;
+    private JButton btnAddVehicle;
+    private JButton btnRemoveVehicle;
+    private JComboBox<String> comboRemoveTarget;
+    private JLabel lblNormalCount;
+    private JLabel lblPriorityCount;
+    private JLabel lblFleetFeedback;
+    private volatile String lastFleetActionMessage = "Frota inicial pronta (Limite: 50 normais | Prioritários excluídos)";
+    private volatile boolean addVehicleEnabledFlag = true;
+    private volatile boolean removeVehicleEnabledFlag = false;
+    private boolean updatingComboItems = false;
+
+    // =========================================================================
+    // FASE 6.2 — CONTROLO MANUAL SEGURO DE SEMÁFOROS POR CLIQUE
+    // =========================================================================
+    private volatile int selectedIntersectionIndex = 0;
+    private JButton btnManualNS;
+    private JButton btnManualEW;
+    private JButton btnManualAuto;
+    private JLabel lblSelectedCrossing;
+    private JLabel lblCrossingStates;
+    private JLabel lblManualStatus;
+    private volatile String lastManualActionMessage = "Modo Automático em todos os cruzamentos (Clique num cruzamento)";
+
+    // Executor assíncrono dedicado para garantir que ações JADE nunca bloqueiam o EDT do Swing
+    private final ExecutorService guiActionExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "TrafficMAS-GUI-Worker");
+        t.setDaemon(true);
+        return t;
+    });
+    private volatile Future<?> lastPendingGuiTask = null;
 
     public CitySimulationGUI() {
         this(java.awt.GraphicsEnvironment.isHeadless());
@@ -159,33 +205,50 @@ public class CitySimulationGUI {
         this.roadGraph = new RoadNetworkGraph(this.topology);
         boolean effectiveHeadless = headless || java.awt.GraphicsEnvironment.isHeadless();
 
-        if (!effectiveHeadless) {
-            windowFrame = new JFrame("TrafficMAS — Intelligent Multi-Agent Urban Simulation ("
-                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation)");
-            windowFrame.setSize(topology.getWorldWidth(), topology.getWorldHeight());
-            windowFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-            windowFrame.setLocationRelativeTo(null);
-            windowFrame.setResizable(true);
-        }
-
         simulationStartMillis = System.currentTimeMillis();
         resetLights();
 
-        if (!effectiveHeadless && windowFrame != null) {
-            cityPanel = new CityPanel();
-            cityPanel.setDoubleBuffered(true);
-            windowFrame.add(cityPanel);
+        // Inicializa os painéis e componentes Swing (mesmo em modo headless para testes e capturas PNG)
+        cityPanel = new CityPanel();
+        cityPanel.setDoubleBuffered(true);
+        cityPanel.setPreferredSize(new Dimension(topology.getWorldWidth(), topology.getWorldHeight()));
+        installCanvasMouseInteraction();
+
+        initInteractiveControlBar();
+        refreshFleetControlState();
+
+        if (!effectiveHeadless) {
+            windowFrame = new JFrame("TrafficMAS — Intelligent Multi-Agent Urban Simulation ("
+                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation | Fase 6.2)");
+            windowFrame.setLayout(new BorderLayout());
+            windowFrame.add(cityPanel, BorderLayout.CENTER);
+            windowFrame.add(controlBarPanel, BorderLayout.SOUTH);
+            windowFrame.setSize(topology.getWorldWidth(), topology.getWorldHeight() + CONTROL_BAR_HEIGHT);
+            windowFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+            windowFrame.setLocationRelativeTo(null);
+            windowFrame.setResizable(true);
 
             // Loop de simulação a ~30 FPS
             simulationTimer = new Timer(30, e -> {
                 tickCounter++;
                 int interCount = topology.getIntersectionCount();
                 metrics.TrafficMetricsCollector.getInstance().advanceSimulatedTime(0.03333333333333333);
+                if (!SimulationClock.isSimulatedMode()) {
+                    for (int i = 0; i < interCount; i++) {
+                        IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
+                        auth.updateTick(getWaitingCount(i, 0), getWaitingCount(i, 1));
+                        lights[i][0] = auth.getLightState(0);
+                        lights[i][1] = auth.getLightState(1);
+                    }
+                }
                 if (tickCounter % 30 == 0) {
                     for (int i = 0; i < interCount; i++) {
                         metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 0, getWaitingCount(i, 0));
                         metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 1, getWaitingCount(i, 1));
                     }
+                }
+                if (tickCounter % 5 == 0) {
+                    refreshManualControlState();
                 }
                 calculateFps();
                 updatePositions();
@@ -193,6 +256,116 @@ public class CitySimulationGUI {
             });
             simulationTimer.start();
         }
+    }
+
+    private void installCanvasMouseInteraction() {
+        cityPanel.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                selectIntersectionByClick(e.getX(), e.getY());
+            }
+        });
+    }
+
+    private void initInteractiveControlBar() {
+        controlBarPanel = new JPanel(new GridLayout(1, 2, 10, 0));
+        controlBarPanel.setBackground(new Color(28, 34, 44));
+        controlBarPanel.setBorder(new EmptyBorder(6, 12, 6, 12));
+        controlBarPanel.setPreferredSize(new Dimension(topology.getWorldWidth(), CONTROL_BAR_HEIGHT));
+
+        // 1. Painel Esquerdo: Gestão Interativa da Frota (50 Normais + Prioritários Excluídos)
+        JPanel fleetPanel = new JPanel(new GridLayout(2, 1, 2, 3));
+        fleetPanel.setBackground(new Color(38, 46, 58));
+        fleetPanel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(70, 90, 118), 1),
+                new EmptyBorder(4, 8, 4, 8)));
+
+        JPanel fleetTopRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        fleetTopRow.setOpaque(false);
+
+        lblNormalCount = new JLabel("Normais: 0 / 50 (Máx: 50)");
+        lblNormalCount.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        lblNormalCount.setForeground(new Color(95, 195, 255));
+
+        lblPriorityCount = new JLabel("| Prioritários: 0 (Excluídos)");
+        lblPriorityCount.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        lblPriorityCount.setForeground(new Color(255, 110, 125));
+
+        btnAddVehicle = new JButton("+ Adicionar Veículo");
+        btnAddVehicle.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        btnAddVehicle.setFocusPainted(false);
+        btnAddVehicle.addActionListener(e -> triggerAddNormalVehicleAsync());
+
+        btnRemoveVehicle = new JButton("- Remover Veículo");
+        btnRemoveVehicle.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        btnRemoveVehicle.setFocusPainted(false);
+        btnRemoveVehicle.addActionListener(e -> triggerRemoveNormalVehicleAsync());
+
+        comboRemoveTarget = new JComboBox<>(new String[] { "Último Normal" });
+        comboRemoveTarget.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        comboRemoveTarget.setPreferredSize(new Dimension(112, 22));
+
+        fleetTopRow.add(lblNormalCount);
+        fleetTopRow.add(lblPriorityCount);
+        fleetTopRow.add(btnAddVehicle);
+        fleetTopRow.add(btnRemoveVehicle);
+        fleetTopRow.add(comboRemoveTarget);
+
+        lblFleetFeedback = new JLabel("Estado Frota: " + lastFleetActionMessage);
+        lblFleetFeedback.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblFleetFeedback.setForeground(new Color(210, 220, 235));
+
+        fleetPanel.add(fleetTopRow);
+        fleetPanel.add(lblFleetFeedback);
+
+        // 2. Painel Direito: Controlo Manual Seguro dos Semáforos por Clique
+        JPanel manualPanel = new JPanel(new GridLayout(2, 1, 2, 3));
+        manualPanel.setBackground(new Color(38, 46, 58));
+        manualPanel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(70, 90, 118), 1),
+                new EmptyBorder(4, 8, 4, 8)));
+
+        JPanel manualTopRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        manualTopRow.setOpaque(false);
+
+        lblSelectedCrossing = new JLabel("Cruzamento: C1 (NW)");
+        lblSelectedCrossing.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        lblSelectedCrossing.setForeground(new Color(255, 215, 70));
+
+        lblCrossingStates = new JLabel("| NS: GREEN | EW: RED | AUTO");
+        lblCrossingStates.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        lblCrossingStates.setForeground(new Color(180, 235, 195));
+
+        btnManualNS = new JButton("Verde NS");
+        btnManualNS.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        btnManualNS.setFocusPainted(false);
+        btnManualNS.addActionListener(e -> triggerManualPhaseAsync(selectedIntersectionIndex, 0));
+
+        btnManualEW = new JButton("Verde EW");
+        btnManualEW.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        btnManualEW.setFocusPainted(false);
+        btnManualEW.addActionListener(e -> triggerManualPhaseAsync(selectedIntersectionIndex, 1));
+
+        btnManualAuto = new JButton("Modo Automático");
+        btnManualAuto.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        btnManualAuto.setFocusPainted(false);
+        btnManualAuto.addActionListener(e -> triggerReturnToAutoAsync(selectedIntersectionIndex));
+
+        manualTopRow.add(lblSelectedCrossing);
+        manualTopRow.add(lblCrossingStates);
+        manualTopRow.add(btnManualNS);
+        manualTopRow.add(btnManualEW);
+        manualTopRow.add(btnManualAuto);
+
+        lblManualStatus = new JLabel("Controlo Semafórico: " + lastManualActionMessage);
+        lblManualStatus.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblManualStatus.setForeground(new Color(210, 220, 235));
+
+        manualPanel.add(manualTopRow);
+        manualPanel.add(lblManualStatus);
+
+        controlBarPanel.add(fleetPanel);
+        controlBarPanel.add(manualPanel);
     }
 
     private static NetworkTopologyConfig resolveInitialTopology(boolean headless) {
@@ -216,12 +389,17 @@ public class CitySimulationGUI {
         this.vehicles.clear();
         this.redLightViolationsCount.set(0);
         this.spawnSequence.set(0);
+        if (selectedIntersectionIndex >= newTopology.getIntersectionCount()) {
+            selectedIntersectionIndex = 0;
+        }
         resetLights();
+        refreshControlPanels();
         if (!java.awt.GraphicsEnvironment.isHeadless() && windowFrame != null) {
             windowFrame.setTitle("TrafficMAS — Intelligent Multi-Agent Urban Simulation ("
-                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation)");
-            windowFrame.setSize(topology.getWorldWidth(), topology.getWorldHeight());
+                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation | Fase 6.2)");
+            windowFrame.setSize(topology.getWorldWidth(), topology.getWorldHeight() + CONTROL_BAR_HEIGHT);
             if (cityPanel != null) {
+                cityPanel.setPreferredSize(new Dimension(topology.getWorldWidth(), topology.getWorldHeight()));
                 cityPanel.repaint();
             }
         }
@@ -253,7 +431,7 @@ public class CitySimulationGUI {
         }
     }
 
-    public static synchronized CitySimulationGUI peekInstance() {
+    public static CitySimulationGUI peekInstance() {
         return instance;
     }
 
@@ -271,7 +449,7 @@ public class CitySimulationGUI {
         return instance;
     }
 
-    public synchronized void setTrafficLights(int intersectionIndex, LightState nsState, LightState ewState) {
+    public void setTrafficLights(int intersectionIndex, LightState nsState, LightState ewState) {
         if (intersectionIndex >= 0 && intersectionIndex < lights.length) {
             lights[intersectionIndex][0] = nsState;
             lights[intersectionIndex][1] = ewState;
@@ -279,21 +457,21 @@ public class CitySimulationGUI {
         }
     }
 
-    public synchronized void setTrafficLight(int intersectionIndex, int axis, LightState state) {
+    public void setTrafficLight(int intersectionIndex, int axis, LightState state) {
         if (intersectionIndex >= 0 && intersectionIndex < lights.length && axis >= 0 && axis <= 1) {
             lights[intersectionIndex][axis] = state;
             IntersectionSafetyAuthority.assertSafetyInvariant(lights[intersectionIndex][0], lights[intersectionIndex][1]);
         }
     }
 
-    public synchronized LightState getTrafficLightState(int intersectionIndex, int axis) {
+    public LightState getTrafficLightState(int intersectionIndex, int axis) {
         if (intersectionIndex >= 0 && intersectionIndex < lights.length && axis >= 0 && axis <= 1) {
             return lights[intersectionIndex][axis];
         }
         return LightState.RED;
     }
 
-    public synchronized void resetLights() {
+    public void resetLights() {
         for (int i = 0; i < lights.length; i++) {
             lights[i][0] = (i % 2 == 0) ? LightState.GREEN : LightState.RED;
             lights[i][1] = (i % 2 == 0) ? LightState.RED : LightState.GREEN;
@@ -344,6 +522,16 @@ public class CitySimulationGUI {
         VisualVehicle existing = getVisualVehicle(id);
         if (existing != null) {
             return existing;
+        }
+
+        // Regra Fase 6.2: A contagem de veículos normais nunca pode ultrapassar 50 (prioritários excluídos)
+        if (!isEmergency) {
+            long currentNormals = vehicles.stream().filter(vv -> !vv.isEmergency).count();
+            if (currentNormals >= FleetLifecycleManager.MAX_NORMAL_VEHICLES) {
+                lastFleetActionMessage = "Limite máximo atingido (50/50 veículos normais). Adição bloqueada.";
+                refreshFleetControlState();
+                return null;
+            }
         }
 
         NetworkTopologyConfig top = this.topology;
@@ -441,6 +629,7 @@ public class CitySimulationGUI {
         }
 
         vehicles.add(v);
+        refreshFleetControlState();
         return v;
     }
 
@@ -561,7 +750,11 @@ public class CitySimulationGUI {
      */
     public synchronized boolean removeVehicle(String vehicleId) {
         if (vehicleId == null) return false;
-        return vehicles.removeIf(v -> vehicleId.equals(v.id));
+        boolean removed = vehicles.removeIf(v -> vehicleId.equals(v.id));
+        if (removed) {
+            refreshFleetControlState();
+        }
+        return removed;
     }
 
     /**
@@ -570,6 +763,7 @@ public class CitySimulationGUI {
     public synchronized void clearVehicles() {
         vehicles.clear();
         spawnSequence.set(0);
+        refreshFleetControlState();
     }
 
     public List<VisualVehicle> getVisualVehiclesSnapshot() {
@@ -577,20 +771,517 @@ public class CitySimulationGUI {
     }
 
     /* =========================================================================
+     * FASE 6.2 — API INTERATIVA DE GESTÃO DA FROTA E CONTROLO MANUAL DE SEMÁFOROS
+     * ========================================================================= */
+
+    public void refreshControlPanels() {
+        refreshFleetControlState();
+        refreshManualControlState();
+    }
+
+    /**
+     * Atualiza o estado visual dos botões (+ Adicionar / - Remover), contadores e lista de seleção,
+     * refletindo rigorosamente a contagem real de veículos normais (0..50) e prioritários.
+     */
+    public void refreshFleetControlState() {
+        FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
+        final int maxNormal = fleet.getMaxNormalVehicles();
+        final int normalCount;
+        final int priorityCount;
+
+        if (fleet.getAgentContainer() != null && (fleet.getActiveNormalVehicleCount() > 0 || fleet.getActivePriorityVehicleCount() > 0 || vehicles.isEmpty())) {
+            normalCount = fleet.getActiveNormalVehicleCount();
+            priorityCount = fleet.getActivePriorityVehicleCount();
+        } else {
+            normalCount = (int) vehicles.stream().filter(v -> !v.isEmergency).count();
+            priorityCount = (int) vehicles.stream().filter(v -> v.isEmergency).count();
+        }
+
+        final boolean canAdd = (normalCount < maxNormal);
+        final boolean canRemove = (normalCount > 0);
+        this.addVehicleEnabledFlag = canAdd;
+        this.removeVehicleEnabledFlag = canRemove;
+        final List<String> ids = (fleet.getAgentContainer() != null && !fleet.getActiveNormalVehicleIds().isEmpty())
+                ? fleet.getActiveNormalVehicleIds()
+                : getVisualNormalVehicleIds();
+
+        Runnable uiUpdater = () -> {
+            if (btnAddVehicle != null) {
+                btnAddVehicle.setEnabled(canAdd);
+                btnAddVehicle.setToolTipText(canAdd
+                        ? "Adicionar 1 veículo normal autónomo JADE (" + normalCount + "/" + maxNormal + ")"
+                        : "Limite máximo de " + maxNormal + " veículos normais atingido (Desativado)");
+            }
+            if (btnRemoveVehicle != null) {
+                btnRemoveVehicle.setEnabled(canRemove);
+                btnRemoveVehicle.setToolTipText(canRemove
+                        ? "Remover veículo normal selecionado e encerrar agente JADE"
+                        : "Sem veículos normais ativos para remover (0/" + maxNormal + ")");
+            }
+            if (lblNormalCount != null) {
+                lblNormalCount.setText("Normais: " + normalCount + " / " + maxNormal + " (Máx: " + maxNormal + ")");
+            }
+            if (lblPriorityCount != null) {
+                lblPriorityCount.setText("| Prioritários: " + priorityCount + " (Excluídos)");
+            }
+            if (lblFleetFeedback != null) {
+                lblFleetFeedback.setText("Estado Frota: " + lastFleetActionMessage);
+            }
+
+            if (comboRemoveTarget != null && !updatingComboItems) {
+                updatingComboItems = true;
+                try {
+                    Object prevSelected = comboRemoveTarget.getSelectedItem();
+                    comboRemoveTarget.removeAllItems();
+                    comboRemoveTarget.addItem("Último Normal");
+                    for (String id : ids) {
+                        comboRemoveTarget.addItem(id);
+                    }
+                    if (prevSelected != null) {
+                        comboRemoveTarget.setSelectedItem(prevSelected);
+                    }
+                } finally {
+                    updatingComboItems = false;
+                }
+            }
+        };
+
+        if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(uiUpdater);
+        } else {
+            uiUpdater.run();
+        }
+    }
+
+    private List<String> getVisualNormalVehicleIds() {
+        List<String> list = new ArrayList<>();
+        for (VisualVehicle v : vehicles) {
+            if (!v.isEmergency) {
+                list.add(v.id);
+            }
+        }
+        return list;
+    }
+
+    /**
+     * Atualiza o painel de controlo manual semafórico para refletir o cruzamento selecionado,
+     * o estado real efetivamente aplicado (NS/EW), eventual pedido pendente (ACCEPTED) ou aplicado (APPLIED),
+     * modo atual (AUTOMÁTICO / MANUAL) e recusa/preempção por emergência.
+     */
+    public void refreshManualControlState() {
+        int count = topology.getIntersectionCount();
+        if (selectedIntersectionIndex < 0 || selectedIntersectionIndex >= count) {
+            selectedIntersectionIndex = 0;
+        }
+        final int idx = selectedIntersectionIndex;
+        final String label = topology.getIntersectionDisplayLabel(idx);
+        IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(idx);
+
+        final LightState nsReal = auth.getLightState(0);
+        final LightState ewReal = auth.getLightState(1);
+        lights[idx][0] = nsReal;
+        lights[idx][1] = ewReal;
+
+        final boolean emActive = auth.isEmergencyActive();
+        final boolean manualActive = auth.isManualModeActive();
+        final IntersectionSafetyAuthority.ManualOverrideRequest activeReq = auth.getActiveManualRequest();
+        final IntersectionSafetyAuthority.ManualOverrideRequest lastReq = auth.getLastManualRequest();
+
+        final String modeTag;
+        if (emActive) {
+            modeTag = "EMERGÊNCIA PRIORITÁRIA";
+        } else if (manualActive && activeReq != null) {
+            if (activeReq.getState() == IntersectionSafetyAuthority.ManualRequestState.ACCEPTED) {
+                modeTag = "MANUAL (PENDENTE: Transição Segura)";
+            } else {
+                modeTag = "MANUAL (ATIVO: Eixo " + activeReq.getTargetAxisName() + ")";
+            }
+        } else {
+            modeTag = "AUTOMÁTICO";
+        }
+
+        final String statusDetail;
+        if (activeReq != null) {
+            statusDetail = "Pedido " + activeReq.requestId + " [" + activeReq.getState() + "] — " + activeReq.getStatusReason();
+        } else if (lastReq != null) {
+            statusDetail = "Último: " + lastReq.requestId + " [" + lastReq.getState() + "] — " + lastReq.getStatusReason();
+        } else {
+            statusDetail = lastManualActionMessage;
+        }
+
+        Runnable uiUpdater = () -> {
+            if (lblSelectedCrossing != null) {
+                lblSelectedCrossing.setText("Cruzamento: " + label);
+            }
+            if (lblCrossingStates != null) {
+                lblCrossingStates.setText("| NS: " + nsReal + " | EW: " + ewReal + " | " + modeTag);
+            }
+            if (btnManualAuto != null) {
+                btnManualAuto.setEnabled(manualActive || activeReq != null);
+            }
+            if (lblManualStatus != null) {
+                lblManualStatus.setText("Controlo Semafórico: " + statusDetail);
+            }
+        };
+
+        if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(uiUpdater);
+        } else {
+            uiUpdater.run();
+        }
+    }
+
+    /**
+     * Executa adição interativa de veículo normal sem bloquear o Event Dispatch Thread (EDT) do Swing.
+     */
+    public void triggerAddNormalVehicleAsync() {
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                performInteractiveAddNormalVehicle();
+                SwingUtilities.invokeLater(() -> {
+                    refreshControlPanels();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            performInteractiveAddNormalVehicle();
+            refreshControlPanels();
+        }
+    }
+
+    /**
+     * Executa remoção interativa de veículo normal sem bloquear o Event Dispatch Thread (EDT) do Swing.
+     */
+    public void triggerRemoveNormalVehicleAsync() {
+        final String selectedTarget = getSelectedVehicleTargetForRemoval();
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                performInteractiveRemoveNormalVehicle(selectedTarget);
+                SwingUtilities.invokeLater(() -> {
+                    refreshControlPanels();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            performInteractiveRemoveNormalVehicle(selectedTarget);
+            refreshControlPanels();
+        }
+    }
+
+    private String getSelectedVehicleTargetForRemoval() {
+        if (comboRemoveTarget != null) {
+            Object item = comboRemoveTarget.getSelectedItem();
+            if (item != null) {
+                String s = item.toString().trim();
+                if (!s.isEmpty() && !s.startsWith("Último")) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Operação síncrona de adição interativa usando {@link FleetLifecycleManager#addNormalVehicle()}.
+     */
+    public FleetLifecycleManager.LifecycleOperationResult performInteractiveAddNormalVehicle() {
+        FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
+        String addedId = fleet.addNormalVehicle();
+        boolean ok = (addedId != null);
+        String msg = ok
+                ? ("Adicionado com sucesso: " + addedId)
+                : ("Limite máximo atingido (" + fleet.getMaxNormalVehicles() + " veículos normais). Adição bloqueada.");
+        FleetLifecycleManager.LifecycleOperationResult res = new FleetLifecycleManager.LifecycleOperationResult(
+                ok, addedId, fleet.getActiveNormalVehicleCount(), fleet.getActivePriorityVehicleCount(), msg);
+        this.lastFleetActionMessage = res.message + " (Normais: " + res.activeNormalCount + "/" + fleet.getMaxNormalVehicles() + ")";
+        refreshFleetControlState();
+        return res;
+    }
+
+    /**
+     * Operação síncrona de remoção interativa usando {@link FleetLifecycleManager#removeNormalVehicle()}.
+     */
+    public FleetLifecycleManager.LifecycleOperationResult performInteractiveRemoveNormalVehicle(String specificVehicleId) {
+        FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
+        String removedId;
+        boolean ok;
+        if (specificVehicleId != null && !specificVehicleId.isEmpty()) {
+            ok = fleet.removeNormalVehicle(specificVehicleId);
+            removedId = ok ? specificVehicleId : null;
+        } else {
+            removedId = fleet.removeNormalVehicle();
+            ok = (removedId != null);
+        }
+        String msg = ok
+                ? ("Removido com sucesso: " + removedId)
+                : "Sem veículos normais ativos para remover (0/50) ou ID inválido.";
+        FleetLifecycleManager.LifecycleOperationResult res = new FleetLifecycleManager.LifecycleOperationResult(
+                ok, removedId, fleet.getActiveNormalVehicleCount(), fleet.getActivePriorityVehicleCount(), msg);
+        this.lastFleetActionMessage = res.message + " (Normais: " + res.activeNormalCount + "/" + fleet.getMaxNormalVehicles() + ")";
+        refreshFleetControlState();
+        return res;
+    }
+
+    public boolean isAddVehicleButtonEnabled() {
+        refreshFleetControlState();
+        return addVehicleEnabledFlag;
+    }
+
+    public boolean isRemoveVehicleButtonEnabled() {
+        refreshFleetControlState();
+        return removeVehicleEnabledFlag;
+    }
+
+    public JButton getBtnAddVehicle() {
+        return btnAddVehicle;
+    }
+
+    public JButton getBtnRemoveVehicle() {
+        return btnRemoveVehicle;
+    }
+
+    public JButton getBtnManualNS() {
+        return btnManualNS;
+    }
+
+    public JButton getBtnManualEW() {
+        return btnManualEW;
+    }
+
+    public JButton getBtnManualAuto() {
+        return btnManualAuto;
+    }
+
+    public String getFleetFeedbackText() {
+        return (lblFleetFeedback != null) ? lblFleetFeedback.getText() : lastFleetActionMessage;
+    }
+
+    public String getManualStatusText() {
+        return (lblManualStatus != null) ? lblManualStatus.getText() : lastManualActionMessage;
+    }
+
+    public String getSelectedCrossingStatesText() {
+        return (lblCrossingStates != null) ? lblCrossingStates.getText() : "";
+    }
+
+    /**
+     * Determina qual o cruzamento clicado nas coordenadas (mouseX, mouseY) do painel gráfico.
+     * Suporta clique direto na caixa do cruzamento, nos 4 postes semafóricos do cruzamento,
+     * ou no indicador correspondente do HUD superior.
+     *
+     * @return índice do cruzamento (0..N-1) ou -1 se o clique não ocorreu sobre nenhum cruzamento.
+     */
+    public int hitTestIntersection(int mouseX, int mouseY) {
+        NetworkTopologyConfig top = this.topology;
+        int interCount = top.getIntersectionCount();
+        int rw = top.getRoadWidth();
+        int margin = 34; // Inclui os 4 postes de semáforos montados nas esquinas do cruzamento
+
+        for (int idx = 0; idx < interCount; idx++) {
+            int ix = top.getIntersectionX(idx);
+            int iy = top.getIntersectionY(idx);
+            if (mouseX >= (ix - margin) && mouseX <= (ix + rw + margin)
+                    && mouseY >= (iy - margin) && mouseY <= (iy + rw + margin)) {
+                return idx;
+            }
+        }
+
+        // Verifica também os indicadores luminosos do HUD superior
+        int hudX = 16;
+        int hudY = 10;
+        int crossStartX = hudX + 685;
+        int stepX = (interCount <= 4) ? 54 : 38;
+        for (int i = 0; i < interCount; i++) {
+            int cx = crossStartX + (i * stepX);
+            if (mouseX >= cx - 2 && mouseX <= cx + 35 && mouseY >= hudY + 8 && mouseY <= hudY + 42) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /**
+     * Seleciona um cruzamento através de um clique nas coordenadas (mouseX, mouseY).
+     * IMPORTANTE: O clique apenas seleciona o cruzamento para controlo; NUNCA altera diretamente a cor no ecrã.
+     */
+    public int selectIntersectionByClick(int mouseX, int mouseY) {
+        int hit = hitTestIntersection(mouseX, mouseY);
+        if (hit >= 0) {
+            this.selectedIntersectionIndex = hit;
+            this.lastManualActionMessage = "Cruzamento " + topology.getIntersectionDisplayLabel(hit)
+                    + " selecionado por clique. Escolha [Verde NS], [Verde EW] ou [Modo Automático].";
+            refreshManualControlState();
+            if (cityPanel != null) {
+                cityPanel.repaint();
+            }
+        }
+        return hit;
+    }
+
+    public void selectIntersection(int intersectionIndex) {
+        if (intersectionIndex >= 0 && intersectionIndex < topology.getIntersectionCount()) {
+            this.selectedIntersectionIndex = intersectionIndex;
+            this.lastManualActionMessage = "Cruzamento " + topology.getIntersectionDisplayLabel(intersectionIndex) + " selecionado.";
+            refreshManualControlState();
+            if (cityPanel != null) {
+                cityPanel.repaint();
+            }
+        }
+    }
+
+    public int getSelectedIntersectionIndex() {
+        return selectedIntersectionIndex;
+    }
+
+    public void triggerManualPhaseAsync(int intersectionIdx, int targetAxis) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                requestManualPhaseFromGui(intersectionIdx, targetAxis);
+                SwingUtilities.invokeLater(() -> {
+                    refreshManualControlState();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            requestManualPhaseFromGui(intersectionIdx, targetAxis);
+        }
+    }
+
+    public void triggerReturnToAutoAsync(int intersectionIdx) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                returnToAutomaticFromGui(intersectionIdx);
+                SwingUtilities.invokeLater(() -> {
+                    refreshManualControlState();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            returnToAutomaticFromGui(intersectionIdx);
+        }
+    }
+
+    /**
+     * Submete pedido manual através do {@link TrafficEnvironment} e {@link IntersectionSafetyAuthority}.
+     * NUNCA altera diretamente as cores na GUI: a mudança visual só ocorre quando a Autoridade de Segurança
+     * executa as transições seguras (YELLOW -> ALL_RED -> GREEN).
+     */
+    public IntersectionSafetyAuthority.ManualOverrideRequest requestManualPhaseFromGui(int intersectionIdx, int targetAxis) {
+        selectIntersection(intersectionIdx);
+        IntersectionSafetyAuthority.ManualOverrideRequest req =
+                TrafficEnvironment.getInstance().requestManualTrafficLightPhase(intersectionIdx, targetAxis);
+        if (req != null) {
+            this.lastManualActionMessage = "Pedido " + req.requestId + " -> " + req.getState() + " (" + req.getStatusReason() + ")";
+        }
+        refreshManualControlState();
+        return req;
+    }
+
+    /**
+     * Regressa o cruzamento selecionado ao modo automático através do {@link TrafficEnvironment} e {@link IntersectionSafetyAuthority}.
+     */
+    public boolean returnToAutomaticFromGui(int intersectionIdx) {
+        selectIntersection(intersectionIdx);
+        IntersectionSafetyAuthority.ManualOverrideRequest prev =
+                TrafficEnvironment.getInstance().returnTrafficLightToAutomatic(intersectionIdx);
+        boolean changed = (prev != null);
+        this.lastManualActionMessage = "Cruzamento " + topology.getIntersectionDisplayLabel(intersectionIdx)
+                + " em MODO AUTOMÁTICO.";
+        refreshManualControlState();
+        return changed;
+    }
+
+    /**
+     * Aguarda a conclusão de tarefas submetidas ao executor assíncrono da GUI (útil em testes de integração).
+     */
+    public boolean awaitPendingGuiActions(long timeoutMs) {
+        try {
+            Future<?> task = this.lastPendingGuiTask;
+            if (task != null) {
+                task.get(timeoutMs, TimeUnit.MILLISECONDS);
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Avança um passo da simulação sincronizando todas as autoridades de segurança semafórica.
+     */
+    public synchronized void stepSimulationTickWithAuthority() {
+        int interCount = topology.getIntersectionCount();
+        for (int i = 0; i < interCount; i++) {
+            IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
+            auth.updateTick(getWaitingCount(i, 0), getWaitingCount(i, 1));
+            lights[i][0] = auth.getLightState(0);
+            lights[i][1] = auth.getLightState(1);
+        }
+        stepSimulationTick();
+        refreshManualControlState();
+    }
+
+    /**
+     * Exporta uma captura PNG completa da interface gráfica Swing (Mapa Urbano + HUD + Painel Interativo Fase 6.2).
+     */
+    public synchronized boolean exportGuiScreenshot(String filePath) {
+        try {
+            refreshControlPanels();
+            int w = topology.getWorldWidth();
+            int mapH = topology.getWorldHeight();
+            int barH = CONTROL_BAR_HEIGHT;
+            int totalH = mapH + barH;
+
+            cityPanel.setSize(w, mapH);
+            cityPanel.doLayout();
+
+            controlBarPanel.setSize(w, barH);
+            controlBarPanel.doLayout();
+            for (Component comp : controlBarPanel.getComponents()) {
+                if (comp instanceof Container) {
+                    comp.doLayout();
+                    for (Component sub : ((Container) comp).getComponents()) {
+                        if (sub instanceof Container) {
+                            sub.doLayout();
+                        }
+                    }
+                }
+            }
+
+            BufferedImage img = new BufferedImage(w, totalH, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g2 = img.createGraphics();
+            cityPanel.paint(g2);
+            g2.translate(0, mapH);
+            controlBarPanel.paint(g2);
+            g2.dispose();
+
+            File outFile = new File(filePath);
+            if (outFile.getParentFile() != null) {
+                outFile.getParentFile().mkdirs();
+            }
+            return ImageIO.write(img, "png", outFile);
+        } catch (Exception e) {
+            System.err.println("[CitySimulationGUI] Erro ao exportar captura PNG: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /* =========================================================================
      * MÉTODOS DE PERCEÇÃO SENSORIAL E ATUAÇÃO PARA OS AGENTES (Features 1, 6, 7, 8)
      * ========================================================================= */
 
-    public synchronized int getTargetIntersection(VisualVehicle v) {
+    public int getTargetIntersection(VisualVehicle v) {
         if (v == null) return 0;
         return topology.getTargetIntersection(v.x, v.y, v.direction);
     }
 
-    public synchronized double getDistanceToTargetStopLine(VisualVehicle v) {
+    public double getDistanceToTargetStopLine(VisualVehicle v) {
         if (v == null) return 9999.0;
         return topology.getDistanceToTargetStopLine(v.x, v.y, v.direction);
     }
 
-    public synchronized int getApproachingCount(int interIdx, int axis) {
+    public int getApproachingCount(int interIdx, int axis) {
         int count = 0;
         for (VisualVehicle v : vehicles) {
             if (v.inIntersection) continue;
@@ -604,7 +1295,7 @@ public class CitySimulationGUI {
         return count;
     }
 
-    public synchronized int getWaitingCount(int interIdx, int axis) {
+    public int getWaitingCount(int interIdx, int axis) {
         int count = 0;
         for (VisualVehicle v : vehicles) {
             if (v.inIntersection) continue;
@@ -618,7 +1309,7 @@ public class CitySimulationGUI {
         return count;
     }
 
-    public synchronized boolean hasEmergencyApproaching(int interIdx, int axis) {
+    public boolean hasEmergencyApproaching(int interIdx, int axis) {
         for (VisualVehicle v : vehicles) {
             if (!v.isEmergency || v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
@@ -631,7 +1322,7 @@ public class CitySimulationGUI {
         return false;
     }
 
-    public synchronized double getVehicleWaitSeconds(String vehicleId) {
+    public double getVehicleWaitSeconds(String vehicleId) {
         for (VisualVehicle v : vehicles) {
             if (v.id.equals(vehicleId)) {
                 if (v.currentStopStartMillis > 0) {
@@ -643,14 +1334,14 @@ public class CitySimulationGUI {
         return 0.0;
     }
 
-    public synchronized VisualVehicle getVisualVehicle(String vehicleId) {
+    public VisualVehicle getVisualVehicle(String vehicleId) {
         for (VisualVehicle v : vehicles) {
             if (v.id.equals(vehicleId)) return v;
         }
         return null;
     }
 
-    public synchronized void triggerEmergencyPreemption(int interIdx, int axis) {
+    public void triggerEmergencyPreemption(int interIdx, int axis) {
         if (interIdx >= 0 && interIdx < topology.getIntersectionCount() && axis >= 0 && axis <= 1) {
             preemptionCount++;
             IntersectionSafetyAuthority.getAuthority(interIdx).requestEmergency("MANUAL_EMERGENCY", axis, null);
@@ -726,15 +1417,15 @@ public class CitySimulationGUI {
         return (queue > 0) ? Math.round((sumWait / queue) * 10.0) / 10.0 : 0.0;
     }
 
-    public synchronized String getDisruptionNotice() {
+    public String getDisruptionNotice() {
         return disruptionNotice;
     }
 
-    public synchronized double getGlobalSpeedMultiplier() {
+    public double getGlobalSpeedMultiplier() {
         return globalSpeedMultiplier;
     }
 
-    public synchronized double getAverageWaitSeconds() {
+    public double getAverageWaitSeconds() {
         double avg = metrics.TrafficMetricsCollector.getInstance().getAverageWaitingTimeSeconds();
         if (avg >= 0.0) {
             return Math.round(avg * 10.0) / 10.0;
@@ -742,17 +1433,17 @@ public class CitySimulationGUI {
         return (totalCompletedPasses > 0) ? Math.round((totalWaitTimeSeconds / totalCompletedPasses) * 10.0) / 10.0 : 0.0;
     }
 
-    public synchronized long getTotalCompletedPasses() {
+    public long getTotalCompletedPasses() {
         long c = metrics.TrafficMetricsCollector.getInstance().getTotalCrossings();
         return (c > 0) ? c : totalCompletedPasses;
     }
 
-    public synchronized int getPreemptionCount() {
+    public int getPreemptionCount() {
         int p = metrics.TrafficMetricsCollector.getInstance().getEmergencyPreemptions();
         return (p > 0) ? p : preemptionCount;
     }
 
-    private synchronized void recordIntersectionCrossing(VisualVehicle v, int interIdx) {
+    private void recordIntersectionCrossing(VisualVehicle v, int interIdx) {
         if (interIdx < 0 || interIdx >= topology.getIntersectionCount()) return;
         int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
         double wait = v.currentCrossingWaitSeconds;
@@ -1453,15 +2144,52 @@ public class CitySimulationGUI {
                 LightState nsState = lights[idx][0];
                 LightState ewState = lights[idx][1];
 
+                // Destaque visual do cruzamento selecionado por clique (Fase 6.2)
+                if (idx == selectedIntersectionIndex) {
+                    Stroke prevStroke = g2.getStroke();
+                    g2.setColor(new Color(0, 215, 255, 70));
+                    g2.setStroke(new BasicStroke(4.5f));
+                    g2.draw(new RoundRectangle2D.Double(ix - 8, iy - 8, rw + 16, rw + 16, 12, 12));
+                    g2.setColor(new Color(255, 215, 40, 230));
+                    g2.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
+                            0, new float[] { 6, 4 }, 0));
+                    g2.draw(new RoundRectangle2D.Double(ix - 5, iy - 5, rw + 10, rw + 10, 10, 10));
+                    g2.setStroke(prevStroke);
+                }
+
                 // 4 Semáforos montados no lado direito de cada aproximação
                 drawTrafficLight(g2, ix - 13, iy - 22, 0, nsState);
                 drawTrafficLight(g2, ix + rw + 13, iy + rw + 22, 1, nsState);
                 drawTrafficLight(g2, ix - 22, iy + rw + 13, 2, ewState);
                 drawTrafficLight(g2, ix + rw + 22, iy - 13, 3, ewState);
 
-                g2.setColor(new Color(255, 255, 255, 195));
+                g2.setColor(new Color(255, 255, 255, 215));
                 g2.setFont(new Font("Segoe UI", Font.BOLD, 11));
-                g2.drawString(name, ix + rw / 2 - 18, iy + rw / 2 + 4);
+                g2.drawString(name, ix + rw / 2 - 20, iy + rw / 2 - 2);
+
+                // Etiqueta de Modo de Controlo do Cruzamento (AUTO / MANUAL / TRANS. / EMERG!)
+                IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(idx);
+                IntersectionSafetyAuthority.ManualOverrideRequest mReq = auth.getActiveManualRequest();
+                String modeBadge;
+                Color badgeColor;
+                if (auth.isEmergencyActive()) {
+                    modeBadge = "EMERG!";
+                    badgeColor = new Color(235, 45, 55);
+                } else if (mReq != null && mReq.getState() == IntersectionSafetyAuthority.ManualRequestState.ACCEPTED) {
+                    modeBadge = "TRANS.";
+                    badgeColor = new Color(245, 175, 25);
+                } else if (auth.isManualModeActive()) {
+                    modeBadge = "MANUAL";
+                    badgeColor = new Color(0, 195, 245);
+                } else {
+                    modeBadge = "AUTO";
+                    badgeColor = new Color(150, 175, 195);
+                }
+                g2.setColor(new Color(20, 24, 30, 190));
+                g2.fillRoundRect(ix + rw / 2 - 22, iy + rw / 2 + 4, 44, 13, 5, 5);
+                g2.setColor(badgeColor);
+                g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+                g2.drawString(modeBadge, ix + rw / 2 - 18, iy + rw / 2 + 14);
             }
         }
 

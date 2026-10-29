@@ -2,7 +2,7 @@
 
 [![Java](https://img.shields.io/badge/Java-LTS-ED8B00?style=for-the-badge&logo=openjdk&logoColor=white)](https://www.oracle.com/java/)
 [![JADE](https://img.shields.io/badge/Multi--Agent-JADE%204.6-007396?style=for-the-badge&logo=eclipse-ide&logoColor=white)](https://jade.tilab.com)
-[![Tests](https://img.shields.io/badge/Testes%20Automatizados-133%2F133%20PASSOU-2ea44f?style=for-the-badge)](#6-execução-das-12-suites-de-testes-automatizados-133-testes--fases-1-a-61)
+[![Tests](https://img.shields.io/badge/Testes%20Automatizados-158%2F158%20PASSOU-2ea44f?style=for-the-badge)](#6-execução-das-13-suites-de-testes-automatizados-158-testes--fases-1-a-62)
 [![ISPGaya](https://img.shields.io/badge/Instituição-ISPGaya-red?style=for-the-badge)](http://www.ispgaya.pt/)
 
 > **Unidade Curricular:** Inteligência Artificial (1.º Semestre — 2026/2027)  
@@ -95,6 +95,8 @@ O sistema substitui os controladores semafóricos tradicionais de temporização
 | **8. Coordenação Central Multi-Corredor** | [`CentralCoordinationAgent.java`](src/agents/CentralCoordinationAgent.java) | ✅ Concluído | Monitorização dos 9 cruzamentos e sincronismo de Onda Verde (*Green Wave*) nos 3 corredores horizontais e 3 corredores verticais. |
 | **9. Gestão Preditiva de Perturbações (ML)** | [`DisruptionManagementAgent.java`](src/agents/DisruptionManagementAgent.java) | ✅ Concluído | Inferência online com modelos supervisionados validados sem *data leakage* (horizonte $t + 60\text{s}$) e proteção explícita contra extrapolação não validada entre topologias. |
 | **10. Telemetria e Avaliação Experimental** | [`TrafficMetricsCollector.java`](src/metrics/TrafficMetricsCollector.java) | ✅ Concluído | Recolha parametrizada para 4 ou 9 cruzamentos com proteção anti-dupla-contagem (debounce de `2.0s`) e campanha experimental estatística completa (`160` corridas 2×2). |
+| **11. Gestão Interativa da Frota (0..50) na GUI** | [`CitySimulationGUI.java`](src/environment/CitySimulationGUI.java) / [`FleetLifecycleManager.java`](src/environment/FleetLifecycleManager.java) | ✅ Concluído | Painel interativo Swing para adicionar/remover veículos normais (`0..50`, botão `+ Adicionar` desativado a `50/50`), mantendo os 3 veículos prioritários intocados e correspondência 1:1 com agentes JADE sem bloquear o EDT. |
+| **12. Controlo Manual Seguro de Semáforos por Clique** | [`IntersectionSafetyAuthority.java`](src/environment/IntersectionSafetyAuthority.java) / [`CitySimulationGUI.java`](src/environment/CitySimulationGUI.java) | ✅ Concluído | Clique em cruzamento/poste semafórico na GUI + botões `Verde NS`, `Verde EW` e `Modo Automático`; ciclo de estados rastreável (`REQUESTED` $\rightarrow$ `ACCEPTED` $\rightarrow$ `APPLIED` após `YELLOW` `1500 ms` + `ALL_RED` `1000 ms`) e prioridade absoluta de emergência (`REJECTED` / `PREEMPTED`). |
 
 ---
 
@@ -200,9 +202,9 @@ java "-Dfile.encoding=UTF-8" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" Ma
 
 ---
 
-## 6. Execução das 12 Suites de Testes Automatizados (133 Testes — Fases 1 a 6.1)
+## 6. Execução das 13 Suites de Testes Automatizados (158 Testes — Fases 1 a 6.2)
 
-O projeto conta com **133 testes automatizados distribuídos por 12 suites independentes (100% de aprovação: 133 PASSOU | 0 FALHOU)**:
+O projeto conta com **158 testes automatizados distribuídos por 13 suites independentes (100% de aprovação: 158 PASSOU | 0 FALHOU)**:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run_tests.ps1
@@ -214,24 +216,25 @@ powershell -ExecutionPolicy Bypass -File .\run_tests.ps1
 | :-: | :--- | :---: | :---: | :--- |
 | 1 | `test.SafetyTestSuite` | Fase 1 | `7` | Máquina de estados segura, transições `YELLOW`/`ALL_RED`, emergências simultâneas e invariante anti-colisão. |
 | 2 | `test.VehicleTestSuite` | Fase 2 | `7` | Resolução canónica de semáforos, deteção espacial de cruzamentos e anti-debouncing. |
-| 3 | `test.CoordinationTestSuite` | Fase 3 | `10` | Telemetria de corredores, Onda Verde (*Green Wave*), políticas `BALANCED` e precedência de socorro. |
-| 4 | `test.DatasetTestSuite` | Fase 4.1 | `8` | Geração determinística de 9.216 observações ($t+60\text{s}$), ausência de *data leakage* e isolamento por `RunId`. |
-| 5 | `test.MLModelsTestSuite` | Fase 4.2 | `14` | Regressão Logística L2, Árvore CART (`maxDepth=2`), `FeatureScaler`, matriz de confusão e métricas analíticas. |
-| 6 | `test.ModelSelectionTestSuite` | Fase 4.3 | `13` | Seleção em `VAL`, persistência binária, verificação de integridade SHA-256 e avaliação cega em `TEST`. |
-| 7 | `test.OnlineMLIntegrationTestSuite` | Fase 4.4 | `11` | Inferência periódica do `DisruptionManagementAgent`, envio FIPA `DISTURBANCE_ALERT` e reação do Coordenador. |
-| 8 | `test.MetricsTestSuite` | Fase 5.1 | `8` | Contagem exata de travessias, debounce de `2.0s` contra dupla contagem e exportação CSV. |
-| 9 | `test.ExperimentalEvaluationTestSuite` | Fase 5.2 | `10` | Comparação controlada dos 4 modos (`FIXED_TIME`, `LOCAL_ADAPTIVE`, `MULTIAGENT_COORDINATED`, `MULTIAGENT_ML`). |
-| 10 | `test.ExperimentalCorrectiveTestSuite` | Fase 5.2-A | `9` | Sincronização determinística `SimulationClock`/JADE, *warm-up* de `120s` e janela de medição de `600s`. |
-| 11 | `test.ExperimentalFullCampaignTestSuite` | Fase 5.2-B | `15` | Campanha fatorial completa ($4 \times 4 \times 10 = 160$ corridas), testes pareados $t$-Student e Wilcoxon. |
+| 3 | `test.CoordinationTestSuite` | Fase 3 | `11` | Telemetria de corredores, Onda Verde (*Green Wave*), políticas `BALANCED` e precedência de socorro. |
+| 4 | `test.DatasetValidationTest` | Fase 4.1 | `8` | Geração determinística de 9.216 observações ($t+60\text{s}$), ausência de *data leakage* e isolamento por `RunId`. |
+| 5 | `test.MachineLearningModelTest` | Fase 4.2 | `14` | Regressão Logística L2, Árvore CART (`maxDepth=2`), `FeatureScaler`, matriz de confusão e métricas analíticas. |
+| 6 | `test.ModelSelectionAndPersistenceTest` | Fase 4.3 | `13` | Seleção em `VAL`, persistência binária, verificação de integridade SHA-256 e avaliação cega em `TEST`. |
+| 7 | `test.MLAgentIntegrationTest` | Fase 4.4 | `15` | Inferência periódica do `DisruptionManagementAgent`, envio FIPA `DISTURBANCE_ALERT` e reação do Coordenador. |
+| 8 | `test.TrafficMetricsTestSuite` | Fase 5.1 | `15` | Contagem exata de travessias, debounce de `2.0s` contra dupla contagem e exportação CSV. |
+| 9 | `test.ControlledSimulationIntegrationTest` | Fase 5.2 | `1` | Execução integrada controlada dos 4 modos (`FIXED_TIME`, `LOCAL_ADAPTIVE`, `MULTIAGENT_COORDINATED`, `MULTIAGENT_ML`). |
+| 10 | `test.SimulationClockValidationTest` | Fase 5.2-A | `6` | Sincronização determinística `SimulationClock`/JADE, *warm-up* de `120s` e janela de medição de `600s`. |
+| 11 | `test.TrafficExperimentTestSuite` | Fase 5.2-B | `15` | Campanha fatorial completa ($4 \times 4 \times 10 = 160$ corridas), testes pareados $t$-Student e Wilcoxon. |
 | 12 | `test.Phase61ValidationTestSuite` | **Fase 6.1** | **`21`** | **Topologia 3×3 (9 nós), 18 semáforos no DF, Manhattan exata/admissível, A\* vs. Dijkstra (81 pares), rotas bloqueadas/recalculadas, 73 agentes JADE, ciclo `0..50` normais + 3 prioritários e compatibilidade 2×2.** |
-| **Total** | **12 Suites de Testes** | **Fases 1–6.1** | **`133`** | **`133 PASSOU | 0 FALHOU` (100% Aprovação)** |
+| 13 | `test.Phase62ValidationTestSuite` | **Fase 6.2** | **`25`** | **Painel Swing de gestão da frota (`50/50` inicial desativado, `0..50`, 3 prioritários intocados, 100 ciclos add/remove sem fugas), seleção de cruzamento por clique (`C1_NW`..`C9_SE`), máquina `ManualOverrideRequest` (`REQUESTED` $\rightarrow$ `ACCEPTED` $\rightarrow$ `APPLIED` após `YELLOW`+`ALL_RED`), preempção/rejeição por emergência, respeito de sinal pelos veículos e EDT não bloqueante.** |
+| **Total** | **13 Suites de Testes** | **Fases 1–6.2** | **`158`** | **`158 PASSOU | 0 FALHOU` (100% Aprovação)** |
 
 ---
 
 ## 7. Roteiro Evolutivo da Fase 6 (Estado Atual e Próximas Etapas)
 
 - [x] **Fase 6.1 (Concluída — Marco de Inflexão `v6.1-marco-inflexao-3x3`)**: Topologia parametrizável `3×3` (9 cruzamentos), grafo rodoviário direcionado (`24` segmentos), heurística admissível de Manhattan, algoritmo A* validado face a Dijkstra, 18 agentes semáforo e arranque com 50 veículos normais autónomos + 3 veículos prioritários = **73 agentes JADE**.
-- [ ] **Fase 6.2**: Controlos gráficos Swing na interface para adicionar/remover veículos em execução (`0..50`) e controlo manual seguro de semáforos por clique via `IntersectionSafetyAuthority`.
+- [x] **Fase 6.2 (Concluída)**: Controlos gráficos Swing na interface para adicionar/remover veículos em execução (`0..50`) e controlo manual seguro de semáforos por clique via `IntersectionSafetyAuthority`, validado por 25 novos testes automatizados (`158/158` no total).
 - [ ] **Fase 6.3**: Meteorologia e condição física do piso independentes e alteráveis em tempo real (céu limpo, chuva, piso molhado, neve, gelo/baixa aderência) com adaptação física prudente dos veículos e dos semáforos.
 - [ ] **Fase 6.4**: Deteção e cedência física de passagem a veículos prioritários (*corredor de emergência*), mudanças de faixa seguras e política escalonada de prioridades sem *starvation*.
 - [ ] **Fase 6.5**: Coordenação multiagente completa nos 6 corredores `3×3`, novo dataset e treino específico de Machine Learning para 9 cruzamentos, e campanha experimental comparativa final `3×3`.

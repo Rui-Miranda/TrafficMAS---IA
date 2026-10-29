@@ -210,6 +210,28 @@ public class TrafficEnvironment {
         return IntersectionSafetyAuthority.getAuthority(intersectionIndex);
     }
 
+    /**
+     * Submete um pedido de controlo manual seguro para um cruzamento e eixo (0=NS, 1=EW),
+     * passando obrigatoriamente pela {@link IntersectionSafetyAuthority}.
+     */
+    public IntersectionSafetyAuthority.ManualOverrideRequest requestManualTrafficLightPhase(
+            int intersectionIndex, int targetAxis) {
+        return IntersectionSafetyAuthority.getAuthority(intersectionIndex).requestManualPhase(targetAxis);
+    }
+
+    public IntersectionSafetyAuthority.ManualOverrideRequest requestManualTrafficLightPhase(
+            int intersectionIndex, int targetAxis, long holdDurationMs) {
+        return IntersectionSafetyAuthority.getAuthority(intersectionIndex)
+                .requestManualPhase(targetAxis, holdDurationMs);
+    }
+
+    /**
+     * Restitui um cruzamento ao controlo automático normal após intervenção manual.
+     */
+    public IntersectionSafetyAuthority.ManualOverrideRequest returnTrafficLightToAutomatic(int intersectionIndex) {
+        return IntersectionSafetyAuthority.getAuthority(intersectionIndex).returnToAutomaticMode();
+    }
+
     public void setDisruptionNotice(String notice, double speedMultiplier) {
         CitySimulationGUI.getInstance().setDisruptionNotice(notice, speedMultiplier);
     }

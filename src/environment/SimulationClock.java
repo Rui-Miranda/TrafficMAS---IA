@@ -96,6 +96,15 @@ public final class SimulationClock {
     }
 
     /**
+     * Avança o tempo simulado por um delta de milissegundos.
+     */
+    public static synchronized void advanceMillis(long deltaMillis) {
+        if (deltaMillis > 0) {
+            simulatedTimeMillis += deltaMillis;
+        }
+    }
+
+    /**
      * Indica se o relógio está em modo de tempo simulado.
      */
     public static boolean isSimulatedMode() {

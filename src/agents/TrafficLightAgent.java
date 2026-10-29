@@ -211,6 +211,24 @@ public class TrafficLightAgent extends Agent {
                 send(rejMsg);
                 TrafficMetricsCollector.getInstance().recordFipaMessage();
             }
+
+            @Override
+            public void onManualControlStateChanged(IntersectionSafetyAuthority.ManualOverrideRequest req) {
+                if (req == null || req.targetAxis != axis) {
+                    return;
+                }
+                System.out.println("[TrafficLightAgent " + direction + " C" + (intersectionIndex + 1)
+                        + "] Controlo Manual " + req.requestId + " -> Estado=" + req.getState()
+                        + " (" + req.getStatusReason() + ")");
+            }
+
+            @Override
+            public void onManualControlReturnedToAuto(int interIdx, String reason) {
+                if (axis == 0) {
+                    System.out.println("[TrafficLightAgent " + direction + " C" + (interIdx + 1)
+                            + "] Regresso ao controlo automático sincronizado (" + reason + ").");
+                }
+            }
         });
     }
 

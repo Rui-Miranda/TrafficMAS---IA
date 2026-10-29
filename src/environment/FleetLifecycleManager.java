@@ -58,6 +58,26 @@ public final class FleetLifecycleManager {
 
     private final AtomicInteger sequenceCounter = new AtomicInteger(0);
 
+    /**
+     * Resultado estruturado de uma operação interativa de adição ou remoção de veículo normal (Fase 6.2).
+     */
+    public static final class LifecycleOperationResult {
+        public final boolean success;
+        public final String vehicleId;
+        public final int activeNormalCount;
+        public final int activePriorityCount;
+        public final String message;
+
+        public LifecycleOperationResult(boolean success, String vehicleId, int activeNormalCount,
+                                        int activePriorityCount, String message) {
+            this.success = success;
+            this.vehicleId = vehicleId;
+            this.activeNormalCount = activeNormalCount;
+            this.activePriorityCount = activePriorityCount;
+            this.message = message;
+        }
+    }
+
     private FleetLifecycleManager() {}
 
     public static FleetLifecycleManager getInstance() {
@@ -69,6 +89,10 @@ public final class FleetLifecycleManager {
     }
 
     public AgentContainer getBoundContainer() {
+        return activeContainer;
+    }
+
+    public AgentContainer getAgentContainer() {
         return activeContainer;
     }
 
@@ -130,7 +154,7 @@ public final class FleetLifecycleManager {
     /**
      * Obtém o número de veículos normais atualmente ativos.
      */
-    public synchronized int getActiveNormalVehicleCount() {
+    public int getActiveNormalVehicleCount() {
         return normalControllers.size();
     }
 
@@ -144,21 +168,21 @@ public final class FleetLifecycleManager {
     /**
      * Indica se é permitido adicionar mais um veículo normal (true se ativos < 50).
      */
-    public synchronized boolean isAddNormalVehicleAvailable() {
+    public boolean isAddNormalVehicleAvailable() {
         return normalControllers.size() < MAX_NORMAL_VEHICLES;
     }
 
     /**
      * Indica se é possível remover um veículo normal (true se ativos > 0).
      */
-    public synchronized boolean isRemoveNormalVehicleAvailable() {
+    public boolean isRemoveNormalVehicleAvailable() {
         return !normalControllers.isEmpty();
     }
 
     /**
      * Devolve a lista ordenada de identificadores dos veículos normais ativos.
      */
-    public synchronized List<String> getActiveNormalVehicleIds() {
+    public List<String> getActiveNormalVehicleIds() {
         List<String> list = new ArrayList<>(normalControllers.keySet());
         Collections.sort(list);
         return list;
@@ -315,11 +339,11 @@ public final class FleetLifecycleManager {
     /**
      * Obtém a quantidade de veículos prioritários ativos (excluídos do limite de 50 normais).
      */
-    public synchronized int getActivePriorityVehicleCount() {
+    public int getActivePriorityVehicleCount() {
         return priorityControllers.size();
     }
 
-    public synchronized List<String> getActivePriorityVehicleIds() {
+    public List<String> getActivePriorityVehicleIds() {
         List<String> list = new ArrayList<>(priorityControllers.keySet());
         Collections.sort(list);
         return list;

@@ -157,6 +157,135 @@ public class IntersectionSafetyAuthority {
         // Callbacks de Coordenação Multiagente (Fase 3 - Retrocompatíveis)
         default void onCoordinationApplied(CoordinationPolicy policy) {}
         default void onCoordinationRejected(CoordinationPolicy policy, String reason) {}
+
+        // Callbacks de Controlo Manual Seguro (Fase 6.2 - Retrocompatíveis)
+        default void onManualControlStateChanged(ManualOverrideRequest req) {}
+        default void onManualControlReturnedToAuto(int intersectionIndex, String reason) {}
+    }
+
+    /** Estados rastreáveis de um pedido de alteração manual de fase semafórica (Fase 6.2) */
+    public enum ManualRequestState {
+        REQUESTED,
+        ACCEPTED,
+        APPLIED,
+        REJECTED,
+        CANCELLED,
+        PREEMPTED,
+        EXPIRED
+    }
+
+    /**
+     * Registo auditável de intervenção manual do operador sobre um cruzamento (Fase 6.2).
+     * Distingue estritamente os estados REQUESTED, ACCEPTED e APPLIED.
+     */
+    public static class ManualOverrideRequest {
+        public final String requestId;
+        public final int intersectionIndex;
+        public final int targetAxis; // 0 = NS, 1 = EW
+        public final long requestedAtMs;
+        public final long maxHoldDurationMs;
+
+        private volatile ManualRequestState state;
+        private volatile long acceptedAtMs = 0L;
+        private volatile long appliedAtMs = 0L;
+        private volatile long terminatedAtMs = 0L;
+        private volatile boolean wasEverApplied = false;
+        private volatile String statusReason = "REQUESTED";
+
+        public ManualOverrideRequest(String requestId, int intersectionIndex, int targetAxis,
+                                     long requestedAtMs, long maxHoldDurationMs) {
+            this.requestId = requestId;
+            this.intersectionIndex = intersectionIndex;
+            this.targetAxis = targetAxis;
+            this.requestedAtMs = requestedAtMs;
+            this.maxHoldDurationMs = Math.max(2000L, Math.min(30000L, maxHoldDurationMs));
+            this.state = ManualRequestState.REQUESTED;
+        }
+
+        public ManualRequestState getState() {
+            return state;
+        }
+
+        public long getAcceptedAtMs() {
+            return acceptedAtMs;
+        }
+
+        public long getAppliedAtMs() {
+            return appliedAtMs;
+        }
+
+        public long getTerminatedAtMs() {
+            return terminatedAtMs;
+        }
+
+        public boolean wasEverApplied() {
+            return wasEverApplied;
+        }
+
+        public String getStatusReason() {
+            return statusReason;
+        }
+
+        synchronized void markAccepted(long timestampMs, String reason) {
+            this.state = ManualRequestState.ACCEPTED;
+            this.acceptedAtMs = timestampMs;
+            this.statusReason = reason;
+        }
+
+        synchronized void markApplied(long timestampMs, String reason) {
+            this.state = ManualRequestState.APPLIED;
+            if (this.acceptedAtMs == 0L) {
+                this.acceptedAtMs = timestampMs;
+            }
+            this.appliedAtMs = timestampMs;
+            this.wasEverApplied = true;
+            this.statusReason = reason;
+        }
+
+        synchronized void markRejected(long timestampMs, String reason) {
+            this.state = ManualRequestState.REJECTED;
+            this.terminatedAtMs = timestampMs;
+            this.statusReason = reason;
+        }
+
+        synchronized void markCancelled(long timestampMs, String reason) {
+            this.state = ManualRequestState.CANCELLED;
+            this.terminatedAtMs = timestampMs;
+            this.statusReason = reason;
+        }
+
+        synchronized void markPreempted(long timestampMs, String reason) {
+            this.state = ManualRequestState.PREEMPTED;
+            this.terminatedAtMs = timestampMs;
+            this.statusReason = reason;
+        }
+
+        synchronized void markExpired(long timestampMs, String reason) {
+            this.state = ManualRequestState.EXPIRED;
+            this.terminatedAtMs = timestampMs;
+            this.statusReason = reason;
+        }
+
+        synchronized void recordOperatorAutoReturn(long timestampMs, String reason) {
+            this.terminatedAtMs = timestampMs;
+            this.statusReason = reason;
+        }
+
+        public String getTargetAxisName() {
+            return (targetAxis == 0) ? "NS" : (targetAxis == 1 ? "EW" : "AUTO");
+        }
+
+        @Override
+        public String toString() {
+            return "ManualOverrideRequest[id=" + requestId
+                    + ", C" + (intersectionIndex + 1)
+                    + ", axis=" + (targetAxis == 0 ? "NS" : "EW")
+                    + ", state=" + state
+                    + ", reqAt=" + requestedAtMs
+                    + ", accAt=" + acceptedAtMs
+                    + ", appAt=" + appliedAtMs
+                    + ", reason=" + statusReason + "]";
+        }
     }
 
     // Instâncias únicas por cruzamento (0=NW, 1=NE, 2=SW, 3=SE)
@@ -204,6 +333,18 @@ public class IntersectionSafetyAuthority {
     // Políticas de Coordenação Global (Fase 3)
     private CoordinationPolicy activePolicy = null;
     private final java.util.Set<String> processedCmdIds = new java.util.HashSet<>();
+
+    // Controlo Manual Seguro por Cruzamento (Fase 6.2)
+    public static final long DEFAULT_MANUAL_HOLD_DURATION_MS = 12000L;
+    private static final java.util.concurrent.atomic.AtomicLong MANUAL_SEQ =
+            new java.util.concurrent.atomic.AtomicLong(2000L);
+    private ManualOverrideRequest activeManualRequest = null;
+    private ManualOverrideRequest lastManualRequest = null;
+    private final java.util.List<ManualOverrideRequest> manualRequestHistory =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+    private boolean manualModeActive = false;
+    private long manualHoldUntilMs = 0L;
+    private long minManualSwitchGreenMs = 1500L;
 
     // Lista de listeners para despacho FIPA
     private final java.util.List<EmergencyPhaseListener> phaseListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -273,6 +414,18 @@ public class IntersectionSafetyAuthority {
         }
     }
 
+    private void fireManualControlStateChanged(ManualOverrideRequest req) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onManualControlStateChanged(req); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void fireManualControlReturnedToAuto(String reason) {
+        for (EmergencyPhaseListener l : phaseListeners) {
+            try { l.onManualControlReturnedToAuto(intersectionIndex, reason); } catch (Throwable ignored) {}
+        }
+    }
+
     public synchronized int getIntersectionIndex() {
         return intersectionIndex;
     }
@@ -323,6 +476,205 @@ public class IntersectionSafetyAuthority {
 
     public synchronized void setFixedGreenDuration(long fixedGreenDuration) {
         this.fixedGreenDuration = Math.max(2000L, Math.min(10000L, fixedGreenDuration));
+    }
+
+    /* =========================================================================
+     * CONTROLO MANUAL SEGURO DE SEMÁFOROS POR CLIQUE (Fase 6.2 — R5)
+     * ========================================================================= */
+
+    public synchronized boolean isManualModeActive() {
+        return manualModeActive && activeManualRequest != null;
+    }
+
+    public synchronized boolean isEmergencyActive() {
+        return currentlyServingEmergency != null || !emergencyQueue.isEmpty();
+    }
+
+    public synchronized ManualOverrideRequest getActiveManualRequest() {
+        return activeManualRequest;
+    }
+
+    public synchronized ManualOverrideRequest getLastManualRequest() {
+        return lastManualRequest;
+    }
+
+    public synchronized java.util.List<ManualOverrideRequest> getManualRequestHistory() {
+        return new java.util.ArrayList<>(manualRequestHistory);
+    }
+
+    public synchronized void setMinManualSwitchGreenMs(long minManualSwitchGreenMs) {
+        this.minManualSwitchGreenMs = Math.max(0L, Math.min(5000L, minManualSwitchGreenMs));
+    }
+
+    public synchronized long getMinManualSwitchGreenMs() {
+        return minManualSwitchGreenMs;
+    }
+
+    /**
+     * Submete um pedido de alteração manual de fase semafórica para o eixo indicado (0=NS, 1=EW)
+     * com a duração máxima padrão de manutenção manual.
+     */
+    public synchronized ManualOverrideRequest requestManualPhase(int targetAxis) {
+        return requestManualPhase(targetAxis, DEFAULT_MANUAL_HOLD_DURATION_MS);
+    }
+
+    /**
+     * Submete um pedido de alteração manual de fase semafórica garantindo:
+     * 1. Precedência absoluta de veículos de emergência ativos (rejeita se existir socorro ativo).
+     * 2. Transição obrigatória pelo AMARELO (1500ms) e ALL_RED (1000ms) quando muda de eixo.
+     * 3. Separação estrita entre o estado ACCEPTED (pedido validado em transição) e APPLIED (verde efetivado).
+     * 4. Imunidade a cliques rápidos e concorrentes (nunca salta YELLOW nem ALL_RED).
+     *
+     * @param targetAxis Eixo solicitado pelo operador (0 = Norte-Sul, 1 = Este-Oeste)
+     * @param holdDurationMs Duração máxima do verde manual antes de retorno automático (ms)
+     * @return Objeto {@link ManualOverrideRequest} rastreável com ID, timestamps e estado
+     */
+    public synchronized ManualOverrideRequest requestManualPhase(int targetAxis, long holdDurationMs) {
+        long now = SimulationClock.currentTimeMillis();
+        long seq = MANUAL_SEQ.incrementAndGet();
+        String axisLabel = (targetAxis == 0) ? "NS" : (targetAxis == 1 ? "EW" : "INV");
+        String reqId = "MAN_C" + (intersectionIndex + 1) + "_" + axisLabel + "_" + seq;
+
+        ManualOverrideRequest req = new ManualOverrideRequest(
+                reqId, intersectionIndex, targetAxis, now, holdDurationMs);
+        this.lastManualRequest = req;
+        this.manualRequestHistory.add(req);
+        fireManualControlStateChanged(req); // Estado inicial: REQUESTED
+
+        if (targetAxis != 0 && targetAxis != 1) {
+            req.markRejected(now, "REJECTED_INVALID_AXIS");
+            fireManualControlStateChanged(req);
+            return req;
+        }
+
+        // 1. Precedência Absoluta de Emergência Ativa (Secção 5)
+        if (currentlyServingEmergency != null || !emergencyQueue.isEmpty()) {
+            String emId = (currentlyServingEmergency != null)
+                    ? currentlyServingEmergency.vehicleId
+                    : emergencyQueue.peek().vehicleId;
+            String reason = "REJECTED_EMERGENCY_PRIORITY (Emergência ativa: " + emId + ")";
+            req.markRejected(now, reason);
+            System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                    + "] Pedido manual " + reqId + " REJEITADO: " + reason);
+            fireManualControlStateChanged(req);
+            return req;
+        }
+
+        // 2. Gestão de pedidos manuais anteriores / cliques repetidos e concorrentes
+        if (activeManualRequest != null) {
+            if (activeManualRequest.getState() == ManualRequestState.ACCEPTED) {
+                if (activeManualRequest.targetAxis == targetAxis) {
+                    // Clique repetido no mesmo eixo enquanto a transição YELLOW/ALL_RED está em curso:
+                    // Cancela a referência anterior por substituição idempotente, mas NUNCA reinicia nem salta fases!
+                    activeManualRequest.markCancelled(now, "SUPERSEDED_BY_REPEAT_CLICK_" + reqId);
+                    fireManualControlStateChanged(activeManualRequest);
+
+                    req.markAccepted(now, "ACCEPTED_CONTINUING_SAFE_TRANSITION");
+                    this.activeManualRequest = req;
+                    this.manualModeActive = true;
+                    fireManualControlStateChanged(req);
+                    return req;
+                } else {
+                    // Clique concorrente para o eixo oposto antes da aplicação:
+                    activeManualRequest.markCancelled(now, "SUPERSEDED_BY_OPPOSITE_REQUEST_" + reqId);
+                    fireManualControlStateChanged(activeManualRequest);
+                }
+            } else if (activeManualRequest.getState() == ManualRequestState.APPLIED) {
+                if (activeManualRequest.targetAxis == targetAxis
+                        && ((targetAxis == 0 && currentPhase == Phase.NS_GREEN)
+                        || (targetAxis == 1 && currentPhase == Phase.EW_GREEN))) {
+                    // Já aplicado no eixo pedido: renova o hold manual de forma segura
+                    activeManualRequest.markCancelled(now, "RENEWED_BY_" + reqId);
+                    fireManualControlStateChanged(activeManualRequest);
+                } else {
+                    activeManualRequest.recordOperatorAutoReturn(now, "SWITCHED_TO_" + reqId);
+                }
+            }
+        }
+
+        // 3. Suspende qualquer política de coordenação automática concorrente
+        if (activePolicy != null) {
+            cancelCoordinationPolicy("SUSPENDED_BY_MANUAL_CONTROL_" + reqId);
+        }
+
+        // 4. Aceita o pedido manual (ACCEPTED != APPLIED)
+        req.markAccepted(now, "ACCEPTED_PENDING_SAFE_PHASE");
+        this.activeManualRequest = req;
+        this.manualModeActive = true;
+        fireManualControlStateChanged(req);
+
+        // 5. Verifica se o cruzamento já está na fase verde do eixo pretendido
+        if ((targetAxis == 0 && currentPhase == Phase.NS_GREEN)
+                || (targetAxis == 1 && currentPhase == Phase.EW_GREEN)) {
+            this.currentGreenDuration = req.maxHoldDurationMs;
+            this.manualHoldUntilMs = now + req.maxHoldDurationMs;
+            this.phaseStartMillis = now;
+            req.markApplied(now, "APPLIED_IMMEDIATELY_ON_ACTIVE_GREEN");
+            System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                    + "] Controlo manual " + reqId + " ACEITE e APLICADO (eixo " + axisLabel + " já estava em verde).");
+            fireManualControlStateChanged(req);
+            return req;
+        }
+
+        // 6. Se estiver em verde no eixo oposto, agenda ou inicia a transição segura obrigatória:
+        //    GREEN -> YELLOW (1500ms) -> ALL_RED (1000ms) -> GREEN do eixo solicitado
+        long elapsedInCurrentPhase = now - phaseStartMillis;
+        if (currentPhase == Phase.NS_GREEN && targetAxis == 1) {
+            targetNextPhase = Phase.EW_GREEN;
+            if (elapsedInCurrentPhase >= minManualSwitchGreenMs) {
+                applyPhaseAtomic(Phase.NS_YELLOW);
+                System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                        + "] Pedido manual " + reqId + " ACEITE. Transição segura iniciada: NS_GREEN -> NS_YELLOW -> ALL_RED -> EW_GREEN.");
+            } else {
+                System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                        + "] Pedido manual " + reqId + " ACEITE. A aguardar verde mínimo ("
+                        + (minManualSwitchGreenMs - elapsedInCurrentPhase) + "ms) antes de NS_YELLOW.");
+            }
+        } else if (currentPhase == Phase.EW_GREEN && targetAxis == 0) {
+            targetNextPhase = Phase.NS_GREEN;
+            if (elapsedInCurrentPhase >= minManualSwitchGreenMs) {
+                applyPhaseAtomic(Phase.EW_YELLOW);
+                System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                        + "] Pedido manual " + reqId + " ACEITE. Transição segura iniciada: EW_GREEN -> EW_YELLOW -> ALL_RED -> NS_GREEN.");
+            } else {
+                System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                        + "] Pedido manual " + reqId + " ACEITE. A aguardar verde mínimo ("
+                        + (minManualSwitchGreenMs - elapsedInCurrentPhase) + "ms) antes de EW_YELLOW.");
+            }
+        } else {
+            // Já se encontra em NS_YELLOW, EW_YELLOW ou ALL_RED: preserva integralmente a transição de segurança!
+            targetNextPhase = (targetAxis == 0) ? Phase.NS_GREEN : Phase.EW_GREEN;
+            System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                    + "] Pedido manual " + reqId + " ACEITE durante transição (" + currentPhase
+                    + "). Próxima fase segura agendada: " + targetNextPhase + ".");
+        }
+
+        return req;
+    }
+
+    /**
+     * Restitui o cruzamento ao controlo automático normal por comando do operador.
+     * Se existia um pedido manual pendente (ainda não aplicado), marca-o como CANCELLED.
+     */
+    public synchronized ManualOverrideRequest returnToAutomaticMode() {
+        long now = SimulationClock.currentTimeMillis();
+        ManualOverrideRequest prev = this.activeManualRequest;
+        this.manualModeActive = false;
+        this.manualHoldUntilMs = 0L;
+        if (prev != null) {
+            if (prev.getState() == ManualRequestState.ACCEPTED) {
+                prev.markCancelled(now, "CANCELLED_BY_OPERATOR_AUTO_MODE");
+                fireManualControlStateChanged(prev);
+            } else if (prev.getState() == ManualRequestState.APPLIED) {
+                prev.markExpired(now, "RETURNED_TO_AUTO_BY_OPERATOR");
+                fireManualControlStateChanged(prev);
+            }
+            this.activeManualRequest = null;
+        }
+        System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                + "] Controlo manual desativado. Cruzamento restituído ao MODO AUTOMÁTICO.");
+        fireManualControlReturnedToAuto("OPERATOR_REQUESTED_AUTO");
+        return prev;
     }
 
     /* =========================================================================
@@ -482,6 +834,21 @@ public class IntersectionSafetyAuthority {
             cancelCoordinationPolicy("PREEMPTED_BY_EMERGENCY_" + vehicleId);
         }
 
+        // Precedência Absoluta de Emergência sobre Controlo Manual (Fase 6.2 — Secção 5):
+        // Revoga/preempta qualquer pedido manual pendente (ACCEPTED) ou ativo (APPLIED).
+        if (activeManualRequest != null) {
+            String manualPreemptReason = "PREEMPTED_BY_EMERGENCY_" + vehicleId;
+            activeManualRequest.markPreempted(now, manualPreemptReason);
+            System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                    + "] Controlo manual " + activeManualRequest.requestId
+                    + " PREEMPTADO por emergência ativa (" + vehicleId + ").");
+            fireManualControlStateChanged(activeManualRequest);
+            this.activeManualRequest = null;
+            this.manualModeActive = false;
+            this.manualHoldUntilMs = 0L;
+            fireManualControlReturnedToAuto(manualPreemptReason);
+        }
+
         // Processa a transição de segurança se não houver outra emergência em curso
         avaliaEFazProgressoEmergencia();
 
@@ -599,6 +966,34 @@ public class IntersectionSafetyAuthority {
                     // Emergência aguarda no eixo EW: transita para amarelo
                     applyPhaseAtomic(Phase.NS_YELLOW);
                     targetNextPhase = Phase.EW_GREEN;
+                } else if (currentlyServingEmergency == null && activeManualRequest != null) {
+                    if (activeManualRequest.getState() == ManualRequestState.ACCEPTED) {
+                        if (activeManualRequest.targetAxis == 1) {
+                            if (elapsed >= minManualSwitchGreenMs) {
+                                applyPhaseAtomic(Phase.NS_YELLOW);
+                                targetNextPhase = Phase.EW_GREEN;
+                            }
+                        } else {
+                            this.currentGreenDuration = activeManualRequest.maxHoldDurationMs;
+                            this.manualHoldUntilMs = now + activeManualRequest.maxHoldDurationMs;
+                            activeManualRequest.markApplied(now, "APPLIED_ON_NS_GREEN");
+                            fireManualControlStateChanged(activeManualRequest);
+                        }
+                    } else if (activeManualRequest.getState() == ManualRequestState.APPLIED) {
+                        if (now >= manualHoldUntilMs) {
+                            activeManualRequest.markExpired(now, "EXPIRED_MAX_HOLD_AUTO_RETURN");
+                            System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                                    + "] Controlo manual " + activeManualRequest.requestId
+                                    + " expirou. A regressar ao MODO AUTOMÁTICO.");
+                            fireManualControlStateChanged(activeManualRequest);
+                            this.activeManualRequest = null;
+                            this.manualModeActive = false;
+                            this.manualHoldUntilMs = 0L;
+                            fireManualControlReturnedToAuto("EXPIRED_MAX_HOLD");
+                            applyPhaseAtomic(Phase.NS_YELLOW);
+                            targetNextPhase = Phase.EW_GREEN;
+                        }
+                    }
                 } else if (currentlyServingEmergency == null && elapsed >= currentGreenDuration) {
                     // Ciclo adaptativo normal: fim do verde NS
                     applyPhaseAtomic(Phase.NS_YELLOW);
@@ -615,7 +1010,7 @@ public class IntersectionSafetyAuthority {
 
             case ALL_RED:
                 if (elapsed >= allRedDuration) {
-                    // Determina qual o próximo verde com base em emergências ou planeamento
+                    // Determina qual o próximo verde com base em emergências, controlo manual ou planeamento
                     if (currentlyServingEmergency != null) {
                         if (currentlyServingEmergency.axis == 1) {
                             applyPhaseAtomic(Phase.EW_GREEN);
@@ -632,6 +1027,17 @@ public class IntersectionSafetyAuthority {
                                 fireGreenGranted(currentlyServingEmergency);
                             }
                         }
+                    } else if (activeManualRequest != null && activeManualRequest.getState() == ManualRequestState.ACCEPTED) {
+                        Phase nextManual = (activeManualRequest.targetAxis == 0) ? Phase.NS_GREEN : Phase.EW_GREEN;
+                        targetNextPhase = null;
+                        this.currentGreenDuration = activeManualRequest.maxHoldDurationMs;
+                        this.manualHoldUntilMs = now + activeManualRequest.maxHoldDurationMs;
+                        applyPhaseAtomic(nextManual);
+                        activeManualRequest.markApplied(now, "APPLIED_AFTER_SAFE_YELLOW_AND_ALL_RED");
+                        System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                                + "] >>> CONTROLO MANUAL APLICADO (" + activeManualRequest.requestId
+                                + "): Fase " + nextManual + " efetivada após transição segura YELLOW -> ALL_RED.");
+                        fireManualControlStateChanged(activeManualRequest);
                     } else {
                         // Ciclo adaptativo normal ou coordenado (Fase 3 / Fase 5)
                         Phase next = (targetNextPhase != null) ? targetNextPhase : Phase.EW_GREEN;
@@ -679,6 +1085,34 @@ public class IntersectionSafetyAuthority {
                     // Emergência aguarda no eixo NS: transita para amarelo
                     applyPhaseAtomic(Phase.EW_YELLOW);
                     targetNextPhase = Phase.NS_GREEN;
+                } else if (currentlyServingEmergency == null && activeManualRequest != null) {
+                    if (activeManualRequest.getState() == ManualRequestState.ACCEPTED) {
+                        if (activeManualRequest.targetAxis == 0) {
+                            if (elapsed >= minManualSwitchGreenMs) {
+                                applyPhaseAtomic(Phase.EW_YELLOW);
+                                targetNextPhase = Phase.NS_GREEN;
+                            }
+                        } else {
+                            this.currentGreenDuration = activeManualRequest.maxHoldDurationMs;
+                            this.manualHoldUntilMs = now + activeManualRequest.maxHoldDurationMs;
+                            activeManualRequest.markApplied(now, "APPLIED_ON_EW_GREEN");
+                            fireManualControlStateChanged(activeManualRequest);
+                        }
+                    } else if (activeManualRequest.getState() == ManualRequestState.APPLIED) {
+                        if (now >= manualHoldUntilMs) {
+                            activeManualRequest.markExpired(now, "EXPIRED_MAX_HOLD_AUTO_RETURN");
+                            System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
+                                    + "] Controlo manual " + activeManualRequest.requestId
+                                    + " expirou. A regressar ao MODO AUTOMÁTICO.");
+                            fireManualControlStateChanged(activeManualRequest);
+                            this.activeManualRequest = null;
+                            this.manualModeActive = false;
+                            this.manualHoldUntilMs = 0L;
+                            fireManualControlReturnedToAuto("EXPIRED_MAX_HOLD");
+                            applyPhaseAtomic(Phase.EW_YELLOW);
+                            targetNextPhase = Phase.NS_GREEN;
+                        }
+                    }
                 } else if (currentlyServingEmergency == null && elapsed >= currentGreenDuration) {
                     // Ciclo adaptativo normal: fim do verde EW
                     applyPhaseAtomic(Phase.EW_YELLOW);

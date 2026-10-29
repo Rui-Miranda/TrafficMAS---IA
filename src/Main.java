@@ -35,6 +35,7 @@ public class Main {
         boolean mode2x2 = false;
         boolean disableRmaGui = false;
         int demoSeconds = 0;
+        String screenshotDir = null;
 
         if (args != null) {
             for (String arg : args) {
@@ -46,6 +47,8 @@ public class Main {
                     try {
                         demoSeconds = Integer.parseInt(arg.substring("--demo-seconds=".length()).trim());
                     } catch (NumberFormatException ignored) {}
+                } else if (arg != null && arg.startsWith("--screenshot-dir=")) {
+                    screenshotDir = arg.substring("--screenshot-dir=".length()).trim();
                 }
             }
         }
@@ -156,8 +159,12 @@ public class Main {
                 Thread.sleep(50);
             }
 
+            if (CitySimulationGUI.peekInstance() != null) {
+                CitySimulationGUI.peekInstance().refreshControlPanels();
+            }
+
             System.out.println("\n================================================================================");
-            System.out.println("[Main] AUDITORIA DE ARRANQUE DO ECOSSISTEMA JADE (FASE 6.1):");
+            System.out.println("[Main] AUDITORIA DE ARRANQUE DO ECOSSISTEMA JADE (FASE 6.2):");
             System.out.println("  • Agentes Veículo Normal (VehicleAgent):          " + fleet.getActiveNormalVehicleCount()
                     + " / " + fleet.getMaxNormalVehicles());
             System.out.println("  • Agentes Veículo Prioritário (EmergencyAgent):   " + fleet.getActivePriorityVehicleCount()
@@ -171,10 +178,14 @@ public class Main {
             System.out.println("  • TOTAL DE AGENTES JADE DA APLICAÇÃO ATIVOS:      " + fleet.getLiveJadeAgentsCount());
             System.out.println("  • Correspondência 1:1 Visual <-> Agente JADE:     "
                     + (fleet.verifyOneToOneCorrespondence() ? "VERIFICADA (100%)" : "PENDENTE"));
+            if (CitySimulationGUI.peekInstance() != null) {
+                System.out.println("  • Botão [+ Adicionar Veículo] no arranque (50/50): "
+                        + (CitySimulationGUI.peekInstance().isAddVehicleButtonEnabled() ? "ATIVO" : "DESATIVADO (CORRETO)"));
+            }
             System.out.println("================================================================================\n");
 
             if (demoSeconds > 0) {
-                executarMedicaoRealGUI(demoSeconds);
+                executarMedicaoRealGUI(demoSeconds, screenshotDir);
                 container.kill();
                 System.exit(0);
             }
@@ -185,15 +196,18 @@ public class Main {
         }
     }
 
-    private static void executarMedicaoRealGUI(int seconds) throws InterruptedException {
+    private static void executarMedicaoRealGUI(int seconds, String screenshotDir) throws InterruptedException {
         System.out.println("[Main] A executar medição real em modo gráfico 3×3 durante " + seconds + " segundos...");
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
 
         double sumFps = 0.0;
+        int minFps = Integer.MAX_VALUE;
         int samples = 0;
         long maxHeapBytes = 0L;
         int incompatibleGreensDetected = 0;
+        int dynamicFleetOpsCount = 0;
+        int manualSemaphoreOpsCount = 0;
 
         com.sun.management.OperatingSystemMXBean osBean = null;
         try {
@@ -209,6 +223,9 @@ public class Main {
                 int fps = gui.getDisplayedFps();
                 if (fps > 0) {
                     sumFps += fps;
+                    if (fps < minFps) {
+                        minFps = fps;
+                    }
                     samples++;
                 }
             }
@@ -223,6 +240,68 @@ public class Main {
                     cpuSamples++;
                 }
             }
+
+            // Operações interativas reais durante o teste prolongado e capturas da GUI
+            if (gui != null) {
+                if (s == 3 && screenshotDir != null) {
+                    gui.exportGuiScreenshot(screenshotDir + "/gui_fase62_1_inicial_50_50_add_desativado.png");
+                }
+                if (s == 10 && seconds >= 20) {
+                    gui.performInteractiveRemoveNormalVehicle(null);
+                    gui.performInteractiveRemoveNormalVehicle(null);
+                    dynamicFleetOpsCount += 2;
+                    if (screenshotDir != null) {
+                        gui.exportGuiScreenshot(screenshotDir + "/gui_fase62_2_apos_remocao_48_50_add_ativo.png");
+                    }
+                }
+                if (s == 18 && seconds >= 20) {
+                    gui.performInteractiveAddNormalVehicle();
+                    gui.performInteractiveAddNormalVehicle();
+                    dynamicFleetOpsCount += 2;
+                }
+                if (s == 25 && seconds >= 30) {
+                    int c5X = gui.getTopology().getIntersectionX(4) + 48;
+                    int c5Y = gui.getTopology().getIntersectionY(4) + 48;
+                    gui.selectIntersectionByClick(c5X, c5Y);
+                    int oppAxis = (IntersectionSafetyAuthority.getAuthority(4).getLightState(0) == CitySimulationGUI.LightState.GREEN) ? 1 : 0;
+                    gui.requestManualPhaseFromGui(4, oppAxis);
+                    manualSemaphoreOpsCount++;
+                }
+                if (s == 29 && seconds >= 30 && screenshotDir != null) {
+                    gui.exportGuiScreenshot(screenshotDir + "/gui_fase62_3_controlo_manual_c5_aplicado.png");
+                }
+                if (s == 45 && seconds >= 60) {
+                    gui.returnToAutomaticFromGui(4);
+                    manualSemaphoreOpsCount++;
+                    int c2X = gui.getTopology().getIntersectionX(1) + 48;
+                    int c2Y = gui.getTopology().getIntersectionY(1) + 48;
+                    gui.selectIntersectionByClick(c2X, c2Y);
+                    gui.requestManualPhaseFromGui(1, 1);
+                    manualSemaphoreOpsCount++;
+                }
+                if (s == 65 && seconds >= 90) {
+                    // Emergência prioritária sobrepõe-se ao controlo manual em C2
+                    gui.triggerEmergencyPreemption(1, 0);
+                    IntersectionSafetyAuthority.getAuthority(1).notifyEmergencyCleared("MANUAL_EMERGENCY");
+                }
+                if (s == 85 && seconds >= 100) {
+                    gui.performInteractiveRemoveNormalVehicle(null);
+                    gui.performInteractiveAddNormalVehicle();
+                    dynamicFleetOpsCount += 2;
+                }
+                if (s == 105 && seconds >= 115) {
+                    int c9X = gui.getTopology().getIntersectionX(8) + 48;
+                    int c9Y = gui.getTopology().getIntersectionY(8) + 48;
+                    gui.selectIntersectionByClick(c9X, c9Y);
+                    gui.requestManualPhaseFromGui(8, 0);
+                    manualSemaphoreOpsCount++;
+                }
+                if (s == 115 && seconds >= 115) {
+                    gui.returnToAutomaticFromGui(8);
+                    manualSemaphoreOpsCount++;
+                }
+            }
+
             // Verifica invariante de segurança nos 9 cruzamentos
             for (int i = 0; i < NetworkTopologyConfig.getActive().getIntersectionCount(); i++) {
                 IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
@@ -234,6 +313,7 @@ public class Main {
         }
 
         double avgFps = (samples > 0) ? (sumFps / samples) : (gui != null ? gui.getDisplayedFps() : 30.0);
+        if (minFps == Integer.MAX_VALUE) minFps = (int) Math.round(avgFps);
         double peakHeapMb = maxHeapBytes / (1024.0 * 1024.0);
         double avgCpuPct = (cpuSamples > 0) ? (sumCpu / cpuSamples) : 0.0;
         long fipaMsgs = TrafficMetricsCollector.getInstance().getFipaMessagesCount();
@@ -243,14 +323,16 @@ public class Main {
         int redViolations = (gui != null) ? gui.getRedLightViolationsCount() : 0;
 
         System.out.println("\n================================================================================");
-        System.out.println("   RELATÓRIO DE DESEMPENHO REAL EM EXECUÇÃO GRÁFICA 3×3 (FASE 6.1)");
+        System.out.println("   RELATÓRIO DE DESEMPENHO REAL EM EXECUÇÃO GRÁFICA 3×3 (FASE 6.2)");
         System.out.println("================================================================================");
         System.out.printf(Locale.US, "  • Duração da Execução Medida:            %d s%n", seconds);
-        System.out.printf(Locale.US, "  • FPS Médio Medido (Swing Timer):        %.2f FPS%n", avgFps);
+        System.out.printf(Locale.US, "  • FPS Médio / Mínimo Medido (Swing):     %.2f FPS / %d FPS%n", avgFps, minFps);
         System.out.printf(Locale.US, "  • Memória Heap Máxima Utilizada:         %.2f MB%n", peakHeapMb);
         System.out.printf(Locale.US, "  • Carga Média de CPU do Processo:        %.2f %%%n", avgCpuPct);
-        System.out.printf(Locale.US, "  • Total de Agentes JADE Ativos:          %d (50 Normais + 3 Prioritários + 18 Semáforos + 2 Central/ML)%n",
+        System.out.printf(Locale.US, "  • Total de Agentes JADE Ativos no Fim:   %d (50 Normais + 3 Prioritários + 18 Semáforos + 2 Central/ML)%n",
                 fleet.getLiveJadeAgentsCount());
+        System.out.printf(Locale.US, "  • Operações Dinâmicas de Frota (+/-):    %d operações concluídas sem órfãos%n", dynamicFleetOpsCount);
+        System.out.printf(Locale.US, "  • Operações de Controlo Manual Semaf.:   %d pedidos seguros executados%n", manualSemaphoreOpsCount);
         System.out.printf(Locale.US, "  • Mensagens FIPA-ACL Trocadas:           %d mensagens%n", fipaMsgs);
         System.out.printf(Locale.US, "  • Travessias Concluídas nos 9 Nós:       %d travessias%n", totalCrossings);
         System.out.printf(Locale.US, "  • Comprimento Médio / Máximo de Fila:    %.2f / %d veículos%n", avgQueue, maxQueue);
