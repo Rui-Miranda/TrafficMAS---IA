@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "TrafficMAS — Main (3x3 Completo)",
+            "request": "launch",
+            "mainClass": "Main",
+            "projectName": "TrafficMAS---IA_996837d2",
+            "cwd": "${workspaceFolder}",
+            "vmArgs": "-Dfile.encoding=UTF-8"
+        },
+        {
+            "type": "java",
+            "name": "TrafficMAS — Main (Sem RMA GUI)",
+            "request": "launch",
+            "mainClass": "Main",
+            "projectName": "TrafficMAS---IA_996837d2",
+            "args": "--no-rma",
+            "cwd": "${workspaceFolder}",
+            "vmArgs": "-Dfile.encoding=UTF-8"
+        }
+    ]
+}
+

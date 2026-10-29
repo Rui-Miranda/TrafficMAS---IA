@@ -20,7 +20,7 @@ import java.util.*;
  *    ({@link ManeuverIntent#GO_STRAIGHT}, {@link ManeuverIntent#TURN_RIGHT}, {@link ManeuverIntent#TURN_LEFT})
  *    para execução física pelos agentes de veículos nos cruzamentos.
  *
- * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 6.1)
+ * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fases 6.1–6.2)
  */
 public final class AStarPathfinder {
 

@@ -5,7 +5,7 @@ import environment.RoadNetworkGraph.IntersectionNode;
 import environment.RoadNetworkGraph.RoadSegment;
 
 /**
- * Serviço de Cálculo da Distância de Manhattan e Heurística Admissível para o A* (Fase 6.1 — R8).
+ * Serviço de Cálculo da Distância de Manhattan e Heurística Admissível para o A* (Fases 6.1–6.2 — R8).
  *
  * <h3>1. Definição Matemática</h3>
  * <pre>

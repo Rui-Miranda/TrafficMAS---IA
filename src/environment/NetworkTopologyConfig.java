@@ -14,7 +14,7 @@ package environment;
  * 4. Fornecer funções geométricas parametrizadas para deteção do próximo cruzamento,
  *    distância à linha de paragem (stop line), centro de faixa e transposição de linha de saída.
  *
- * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 6.1)
+ * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fases 6.1–6.2)
  */
 public final class NetworkTopologyConfig {
 

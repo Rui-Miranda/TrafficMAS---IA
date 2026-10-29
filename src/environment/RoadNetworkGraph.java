@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 6. Controlo de versão ({@link #getGraphVersion()}) para que os veículos recalculem rotas A* apenas quando
  *    ocorrerem bloqueios, alterações de custo relevantes ou novas missões, evitando recálculos em todos os ticks.
  *
- * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fase 6.1)
+ * @author Equipa de Desenvolvimento TrafficMAS - ISPGaya (Fases 6.1–6.2)
  */
 public class RoadNetworkGraph {
 
