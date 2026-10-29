@@ -136,22 +136,22 @@ public class CitySimulationGUI {
     private final AtomicInteger redLightViolationsCount = new AtomicInteger(0);
     private final AtomicInteger spawnSequence = new AtomicInteger(0);
 
-    // Métricas de HUD em tempo real
-    private long simulationStartMillis;
-    private long tickCounter = 0;
+    // Métricas de HUD em tempo real (volatile para visibilidade cross-thread entre EDT, Main e Agentes JADE)
+    private volatile long simulationStartMillis;
+    private volatile long tickCounter = 0;
     private int fpsCounter = 0;
-    private int displayedFps = 30;
+    private volatile int displayedFps = 30;
     private long lastFpsCheck = System.currentTimeMillis();
 
     // Métricas agregadas de desempenho (Feature 8) e estado preditivo de perturbação (Feature 5)
-    private long totalCompletedPasses = 0;
-    private double totalWaitTimeSeconds = 0.0;
-    private int preemptionCount = 0;
-    private String disruptionNotice = "Condições Normais (Atrito 100%)";
-    private double globalSpeedMultiplier = 1.0;
-    private int weatherCondition = 0; // 0=SECO, 1=CHUVA, 2=NEVOEIRO
-    private boolean incidentPresent = false;
-    private String mlPredictionNotice = "ML Preditivo: Operacional";
+    private volatile long totalCompletedPasses = 0;
+    private volatile double totalWaitTimeSeconds = 0.0;
+    private volatile int preemptionCount = 0;
+    private volatile String disruptionNotice = "Condições Normais (Atrito 100%)";
+    private volatile double globalSpeedMultiplier = 1.0;
+    private volatile int weatherCondition = 0; // 0=SECO, 1=CHUVA, 2=NEVOEIRO
+    private volatile boolean incidentPresent = false;
+    private volatile String mlPredictionNotice = "ML Preditivo: Operacional";
     private JFrame windowFrame;
     private CityPanel cityPanel;
     private JPanel controlBarPanel;
@@ -1224,37 +1224,46 @@ public class CitySimulationGUI {
 
     /**
      * Exporta uma captura PNG completa da interface gráfica Swing (Mapa Urbano + HUD + Painel Interativo Fase 6.2).
+     * Quando uma janela gráfica está ativa, executa o layout e renderização no EDT para respeitar o AWT TreeLock.
      */
-    public synchronized boolean exportGuiScreenshot(String filePath) {
+    public boolean exportGuiScreenshot(String filePath) {
         try {
             refreshControlPanels();
-            int w = topology.getWorldWidth();
-            int mapH = topology.getWorldHeight();
-            int barH = CONTROL_BAR_HEIGHT;
-            int totalH = mapH + barH;
+            final int w = topology.getWorldWidth();
+            final int mapH = topology.getWorldHeight();
+            final int barH = CONTROL_BAR_HEIGHT;
+            final int totalH = mapH + barH;
+            final BufferedImage img = new BufferedImage(w, totalH, BufferedImage.TYPE_INT_RGB);
 
-            cityPanel.setSize(w, mapH);
-            cityPanel.doLayout();
+            Runnable renderTask = () -> {
+                cityPanel.setSize(w, mapH);
+                cityPanel.doLayout();
 
-            controlBarPanel.setSize(w, barH);
-            controlBarPanel.doLayout();
-            for (Component comp : controlBarPanel.getComponents()) {
-                if (comp instanceof Container) {
-                    comp.doLayout();
-                    for (Component sub : ((Container) comp).getComponents()) {
-                        if (sub instanceof Container) {
-                            sub.doLayout();
+                controlBarPanel.setSize(w, barH);
+                controlBarPanel.doLayout();
+                for (Component comp : controlBarPanel.getComponents()) {
+                    if (comp instanceof Container) {
+                        comp.doLayout();
+                        for (Component sub : ((Container) comp).getComponents()) {
+                            if (sub instanceof Container) {
+                                sub.doLayout();
+                            }
                         }
                     }
                 }
-            }
 
-            BufferedImage img = new BufferedImage(w, totalH, BufferedImage.TYPE_INT_RGB);
-            Graphics2D g2 = img.createGraphics();
-            cityPanel.paint(g2);
-            g2.translate(0, mapH);
-            controlBarPanel.paint(g2);
-            g2.dispose();
+                Graphics2D g2 = img.createGraphics();
+                cityPanel.paint(g2);
+                g2.translate(0, mapH);
+                controlBarPanel.paint(g2);
+                g2.dispose();
+            };
+
+            if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+                SwingUtilities.invokeAndWait(renderTask);
+            } else {
+                renderTask.run();
+            }
 
             File outFile = new File(filePath);
             if (outFile.getParentFile() != null) {
@@ -1265,6 +1274,33 @@ public class CitySimulationGUI {
             System.err.println("[CitySimulationGUI] Erro ao exportar captura PNG: " + e.getMessage());
             return false;
         }
+    }
+
+    public long getTickCounter() {
+        return tickCounter;
+    }
+
+    /**
+     * Encerra de forma controlada o Timer gráfico, o executor assíncrono e a janela Swing.
+     */
+    public void shutdownGui() {
+        try {
+            if (simulationTimer != null) {
+                simulationTimer.stop();
+            }
+            guiActionExecutor.shutdownNow();
+            if (windowFrame != null) {
+                if (SwingUtilities.isEventDispatchThread()) {
+                    windowFrame.setVisible(false);
+                    windowFrame.dispose();
+                } else {
+                    SwingUtilities.invokeAndWait(() -> {
+                        windowFrame.setVisible(false);
+                        windowFrame.dispose();
+                    });
+                }
+            }
+        } catch (Throwable ignored) {}
     }
 
     /* =========================================================================
@@ -1371,23 +1407,23 @@ public class CitySimulationGUI {
         this.mlPredictionNotice = notice;
     }
 
-    public synchronized String getMLPredictionNotice() {
+    public String getMLPredictionNotice() {
         return mlPredictionNotice;
     }
 
-    public synchronized int getWeatherCondition() {
+    public int getWeatherCondition() {
         return weatherCondition;
     }
 
-    public synchronized int getIncidentPresent() {
+    public int getIncidentPresent() {
         return incidentPresent ? 1 : 0;
     }
 
-    public synchronized int getRoadCapacity() {
+    public int getRoadCapacity() {
         return incidentPresent ? 2 : 4;
     }
 
-    public synchronized double getAverageSpeed(int interIdx) {
+    public double getAverageSpeed(int interIdx) {
         int volume = 0;
         double sumSpeed = 0.0;
         for (VisualVehicle v : vehicles) {
@@ -1401,7 +1437,7 @@ public class CitySimulationGUI {
         return (volume > 0) ? Math.round((sumSpeed / volume) * 100.0) / 100.0 : (2.4 * globalSpeedMultiplier);
     }
 
-    public synchronized double getAverageWaitingTime(int interIdx) {
+    public double getAverageWaitingTime(int interIdx) {
         int queue = 0;
         double sumWait = 0.0;
         long now = System.currentTimeMillis();

@@ -53,6 +53,10 @@ public class Main {
             }
         }
 
+        if (demoSeconds > 0 && (screenshotDir == null || screenshotDir.isEmpty())) {
+            screenshotDir = "docs/evidencias_fase62";
+        }
+
         // Ativa a topologia 3x3 por defeito (Requisito R1 e R2) ou 2x2 em modo de compatibilidade
         if (mode2x2) {
             NetworkTopologyConfig.activate2x2();
@@ -185,21 +189,49 @@ public class Main {
             System.out.println("================================================================================\n");
 
             if (demoSeconds > 0) {
-                executarMedicaoRealGUI(demoSeconds, screenshotDir);
-                container.kill();
-                System.exit(0);
+                boolean passed = executarMedicaoRealGUI(demoSeconds, screenshotDir);
+                if (CitySimulationGUI.peekInstance() != null) {
+                    CitySimulationGUI.peekInstance().shutdownGui();
+                }
+                final AgentContainer finalContainer = container;
+                Thread killThread = new Thread(() -> {
+                    try {
+                        finalContainer.kill();
+                    } catch (Throwable ignored) {}
+                }, "JADE-Shutdown-Worker");
+                killThread.setDaemon(true);
+                killThread.start();
+                killThread.join(2500);
+                System.out.println("[Main] Encerramento controlado de Swing e JADE concluído. Exit code: " + (passed ? 0 : 1));
+                System.exit(passed ? 0 : 1);
             }
 
         } catch (Exception e) {
             System.err.println("[Main] Erro fatal durante a instanciação dos agentes JADE: " + e.getMessage());
             e.printStackTrace();
+            if (demoSeconds > 0) {
+                System.exit(1);
+            }
         }
     }
 
-    private static void executarMedicaoRealGUI(int seconds, String screenshotDir) throws InterruptedException {
+    private static boolean executarMedicaoRealGUI(int seconds, String screenshotDir) throws InterruptedException {
         System.out.println("[Main] A executar medição real em modo gráfico 3×3 durante " + seconds + " segundos...");
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
+        int interCount = NetworkTopologyConfig.getActive().getIntersectionCount();
+
+        long startTicks = (gui != null) ? gui.getTickCounter() : 0L;
+        java.util.Map<String, double[]> initialPositions = new java.util.HashMap<>();
+        if (gui != null) {
+            for (CitySimulationGUI.VisualVehicle v : gui.getVisualVehiclesSnapshot()) {
+                initialPositions.put(v.id, new double[] { v.x, v.y });
+            }
+        }
+        CitySimulationGUI.LightState[] prevNsStates = new CitySimulationGUI.LightState[interCount];
+        for (int i = 0; i < interCount; i++) {
+            prevNsStates[i] = IntersectionSafetyAuthority.getAuthority(i).getLightState(0);
+        }
 
         double sumFps = 0.0;
         int minFps = Integer.MAX_VALUE;
@@ -208,6 +240,8 @@ public class Main {
         int incompatibleGreensDetected = 0;
         int dynamicFleetOpsCount = 0;
         int manualSemaphoreOpsCount = 0;
+        int emergencyRequestsTriggered = 0;
+        int semaphorePhaseAlternations = 0;
 
         com.sun.management.OperatingSystemMXBean osBean = null;
         try {
@@ -244,31 +278,53 @@ public class Main {
             // Operações interativas reais durante o teste prolongado e capturas da GUI
             if (gui != null) {
                 if (s == 3 && screenshotDir != null) {
-                    gui.exportGuiScreenshot(screenshotDir + "/gui_fase62_1_inicial_50_50_add_desativado.png");
+                    String path = screenshotDir + (seconds == 5 ? "/gui_demo5s_3x3.png" : "/gui_fase62_1_inicial_50_50_add_desativado.png");
+                    boolean saved = gui.exportGuiScreenshot(path);
+                    System.out.println("[Main][t=" + s + "s] Captura PNG guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
+                }
+                if (s == 10 && seconds == 15 && screenshotDir != null) {
+                    String path = screenshotDir + "/gui_demo15s_3x3.png";
+                    boolean saved = gui.exportGuiScreenshot(path);
+                    System.out.println("[Main][t=" + s + "s] Captura PNG 15s guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
                 }
                 if (s == 10 && seconds >= 20) {
-                    gui.performInteractiveRemoveNormalVehicle(null);
-                    gui.performInteractiveRemoveNormalVehicle(null);
+                    FleetLifecycleManager.LifecycleOperationResult r1 = gui.performInteractiveRemoveNormalVehicle(null);
+                    FleetLifecycleManager.LifecycleOperationResult r2 = gui.performInteractiveRemoveNormalVehicle(null);
                     dynamicFleetOpsCount += 2;
+                    System.out.println("[Main][t=" + s + "s][Frota] 2 remoções executadas (" + r1.vehicleId + ", " + r2.vehicleId
+                            + ") -> Normais=" + fleet.getActiveNormalVehicleCount() + "/50 | Botão Adicionar="
+                            + (gui.isAddVehicleButtonEnabled() ? "ATIVO" : "DESATIVADO"));
                     if (screenshotDir != null) {
-                        gui.exportGuiScreenshot(screenshotDir + "/gui_fase62_2_apos_remocao_48_50_add_ativo.png");
+                        String path = screenshotDir + "/gui_fase62_2_apos_remocao_48_50_add_ativo.png";
+                        boolean saved = gui.exportGuiScreenshot(path);
+                        System.out.println("[Main][t=" + s + "s] Captura PNG após remoção guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
                     }
                 }
                 if (s == 18 && seconds >= 20) {
-                    gui.performInteractiveAddNormalVehicle();
-                    gui.performInteractiveAddNormalVehicle();
+                    FleetLifecycleManager.LifecycleOperationResult a1 = gui.performInteractiveAddNormalVehicle();
+                    FleetLifecycleManager.LifecycleOperationResult a2 = gui.performInteractiveAddNormalVehicle();
                     dynamicFleetOpsCount += 2;
+                    System.out.println("[Main][t=" + s + "s][Frota] 2 adições executadas (" + a1.vehicleId + ", " + a2.vehicleId
+                            + ") -> Normais=" + fleet.getActiveNormalVehicleCount() + "/50 | Botão Adicionar="
+                            + (gui.isAddVehicleButtonEnabled() ? "ATIVO" : "DESATIVADO"));
                 }
                 if (s == 25 && seconds >= 30) {
                     int c5X = gui.getTopology().getIntersectionX(4) + 48;
                     int c5Y = gui.getTopology().getIntersectionY(4) + 48;
-                    gui.selectIntersectionByClick(c5X, c5Y);
+                    int clicked = gui.selectIntersectionByClick(c5X, c5Y);
                     int oppAxis = (IntersectionSafetyAuthority.getAuthority(4).getLightState(0) == CitySimulationGUI.LightState.GREEN) ? 1 : 0;
-                    gui.requestManualPhaseFromGui(4, oppAxis);
+                    IntersectionSafetyAuthority.ManualOverrideRequest req = gui.requestManualPhaseFromGui(4, oppAxis);
                     manualSemaphoreOpsCount++;
+                    System.out.println("[Main][t=" + s + "s][Manual] Clique C5_C (idx=" + clicked + ") -> Pedido " + req.requestId
+                            + " Eixo=" + req.getTargetAxisName() + " EstadoInicial=" + req.getState());
                 }
                 if (s == 29 && seconds >= 30 && screenshotDir != null) {
-                    gui.exportGuiScreenshot(screenshotDir + "/gui_fase62_3_controlo_manual_c5_aplicado.png");
+                    IntersectionSafetyAuthority.ManualOverrideRequest activeC5 = IntersectionSafetyAuthority.getAuthority(4).getActiveManualRequest();
+                    System.out.println("[Main][t=" + s + "s][Manual] Estado C5_C após transição YELLOW+ALL_RED: "
+                            + (activeC5 != null ? activeC5.getState() + " (" + activeC5.getStatusReason() + ")" : "N/A"));
+                    String path = screenshotDir + "/gui_fase62_3_controlo_manual_c5_aplicado.png";
+                    boolean saved = gui.exportGuiScreenshot(path);
+                    System.out.println("[Main][t=" + s + "s] Captura PNG controlo manual C5 guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
                 }
                 if (s == 45 && seconds >= 60) {
                     gui.returnToAutomaticFromGui(4);
@@ -276,38 +332,72 @@ public class Main {
                     int c2X = gui.getTopology().getIntersectionX(1) + 48;
                     int c2Y = gui.getTopology().getIntersectionY(1) + 48;
                     gui.selectIntersectionByClick(c2X, c2Y);
-                    gui.requestManualPhaseFromGui(1, 1);
+                    IntersectionSafetyAuthority.ManualOverrideRequest reqC2 = gui.requestManualPhaseFromGui(1, 1);
                     manualSemaphoreOpsCount++;
+                    System.out.println("[Main][t=" + s + "s][Manual] C5_C retornou a AUTO; Clique C2_N -> Pedido " + reqC2.requestId
+                            + " Estado=" + reqC2.getState());
                 }
                 if (s == 65 && seconds >= 90) {
                     // Emergência prioritária sobrepõe-se ao controlo manual em C2
                     gui.triggerEmergencyPreemption(1, 0);
+                    emergencyRequestsTriggered++;
+                    IntersectionSafetyAuthority.ManualOverrideRequest lastC2 = IntersectionSafetyAuthority.getAuthority(1).getLastManualRequest();
+                    System.out.println("[Main][t=" + s + "s][Emergência] Preempção em C2_N -> Pedido manual C2 passou a: "
+                            + (lastC2 != null ? lastC2.getState() + " (" + lastC2.getStatusReason() + ")" : "N/A"));
+                }
+                if (s == 70 && seconds >= 90) {
                     IntersectionSafetyAuthority.getAuthority(1).notifyEmergencyCleared("MANUAL_EMERGENCY");
                 }
                 if (s == 85 && seconds >= 100) {
-                    gui.performInteractiveRemoveNormalVehicle(null);
-                    gui.performInteractiveAddNormalVehicle();
+                    FleetLifecycleManager.LifecycleOperationResult r3 = gui.performInteractiveRemoveNormalVehicle(null);
+                    FleetLifecycleManager.LifecycleOperationResult a3 = gui.performInteractiveAddNormalVehicle();
                     dynamicFleetOpsCount += 2;
+                    System.out.println("[Main][t=" + s + "s][Frota] Ciclo dinâmico (-1/+1): removido=" + r3.vehicleId
+                            + ", adicionado=" + a3.vehicleId + " -> Normais=" + fleet.getActiveNormalVehicleCount() + "/50");
                 }
                 if (s == 105 && seconds >= 115) {
                     int c9X = gui.getTopology().getIntersectionX(8) + 48;
                     int c9Y = gui.getTopology().getIntersectionY(8) + 48;
                     gui.selectIntersectionByClick(c9X, c9Y);
-                    gui.requestManualPhaseFromGui(8, 0);
+                    IntersectionSafetyAuthority.ManualOverrideRequest reqC9 = gui.requestManualPhaseFromGui(8, 0);
                     manualSemaphoreOpsCount++;
+                    System.out.println("[Main][t=" + s + "s][Manual] Clique C9_SE -> Pedido " + reqC9.requestId + " Estado=" + reqC9.getState());
                 }
                 if (s == 115 && seconds >= 115) {
                     gui.returnToAutomaticFromGui(8);
                     manualSemaphoreOpsCount++;
+                    System.out.println("[Main][t=" + s + "s][Manual] C9_SE retornou ao modo AUTOMÁTICO.");
+                    if (screenshotDir != null) {
+                        String path = screenshotDir + "/gui_fase62_4_final_120s_auto_restaurado.png";
+                        boolean saved = gui.exportGuiScreenshot(path);
+                        System.out.println("[Main][t=" + s + "s] Captura PNG final 120s guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
+                    }
                 }
             }
 
-            // Verifica invariante de segurança nos 9 cruzamentos
-            for (int i = 0; i < NetworkTopologyConfig.getActive().getIntersectionCount(); i++) {
+            // Verifica invariante de segurança e alternância semafórica nos 9 cruzamentos
+            for (int i = 0; i < interCount; i++) {
                 IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
-                if (auth.getLightState(0) == CitySimulationGUI.LightState.GREEN
-                        && auth.getLightState(1) == CitySimulationGUI.LightState.GREEN) {
+                CitySimulationGUI.LightState ns = auth.getLightState(0);
+                CitySimulationGUI.LightState ew = auth.getLightState(1);
+                if (ns == CitySimulationGUI.LightState.GREEN && ew == CitySimulationGUI.LightState.GREEN) {
                     incompatibleGreensDetected++;
+                }
+                if (ns != prevNsStates[i]) {
+                    semaphorePhaseAlternations++;
+                    prevNsStates[i] = ns;
+                }
+            }
+        }
+
+        long endTicks = (gui != null) ? gui.getTickCounter() : 0L;
+        long ticksDelta = endTicks - startTicks;
+        int movedVehiclesCount = 0;
+        if (gui != null) {
+            for (CitySimulationGUI.VisualVehicle v : gui.getVisualVehiclesSnapshot()) {
+                double[] init = initialPositions.get(v.id);
+                if (init != null && Math.hypot(v.x - init[0], v.y - init[1]) > 2.0) {
+                    movedVehiclesCount++;
                 }
             }
         }
@@ -321,25 +411,51 @@ public class Main {
         double avgQueue = TrafficMetricsCollector.getInstance().getAverageQueueLength();
         int maxQueue = TrafficMetricsCollector.getInstance().getMaximumQueueLength();
         int redViolations = (gui != null) ? gui.getRedLightViolationsCount() : 0;
+        int emergencyPreemptionsTotal = TrafficMetricsCollector.getInstance().getEmergencyPreemptions() + emergencyRequestsTriggered;
+
+        int normalAgents = fleet.getActiveNormalVehicleCount();
+        int priorityAgents = fleet.getActivePriorityVehicleCount();
+        int tlAgents = fleet.getLiveJadeAgentsCountByType("TrafficLightAgent");
+        int centralAgents = fleet.getLiveJadeAgentsCountByType("CentralCoordinationAgent")
+                + fleet.getLiveJadeAgentsCountByType("DisruptionManagementAgent");
+        int totalJadeAgents = fleet.getLiveJadeAgentsCount();
+        boolean oneToOneOk = fleet.verifyOneToOneCorrespondence();
+
+        boolean allChecksPassed = (normalAgents == 50)
+                && (priorityAgents == 3)
+                && (tlAgents == 18)
+                && (centralAgents == 2)
+                && (totalJadeAgents == 73)
+                && (ticksDelta > 0)
+                && (movedVehiclesCount > 0)
+                && (redViolations == 0)
+                && (incompatibleGreensDetected == 0)
+                && oneToOneOk;
 
         System.out.println("\n================================================================================");
         System.out.println("   RELATÓRIO DE DESEMPENHO REAL EM EXECUÇÃO GRÁFICA 3×3 (FASE 6.2)");
         System.out.println("================================================================================");
         System.out.printf(Locale.US, "  • Duração da Execução Medida:            %d s%n", seconds);
+        System.out.printf(Locale.US, "  • Avanço do Contador Gráfico (Ticks):    +%d ticks (%d -> %d)%n", ticksDelta, startTicks, endTicks);
+        System.out.printf(Locale.US, "  • Veículos com Movimento Físico Real:    %d / %d veículos%n", movedVehiclesCount, initialPositions.size());
+        System.out.printf(Locale.US, "  • Alternâncias de Fase Semafórica:       %d transições observadas%n", semaphorePhaseAlternations);
         System.out.printf(Locale.US, "  • FPS Médio / Mínimo Medido (Swing):     %.2f FPS / %d FPS%n", avgFps, minFps);
         System.out.printf(Locale.US, "  • Memória Heap Máxima Utilizada:         %.2f MB%n", peakHeapMb);
         System.out.printf(Locale.US, "  • Carga Média de CPU do Processo:        %.2f %%%n", avgCpuPct);
-        System.out.printf(Locale.US, "  • Total de Agentes JADE Ativos no Fim:   %d (50 Normais + 3 Prioritários + 18 Semáforos + 2 Central/ML)%n",
-                fleet.getLiveJadeAgentsCount());
+        System.out.printf(Locale.US, "  • Total de Agentes JADE Ativos no Fim:   %d (Normais=%d, Prioritários=%d, Semáforos=%d, Centrais=%d)%n",
+                totalJadeAgents, normalAgents, priorityAgents, tlAgents, centralAgents);
         System.out.printf(Locale.US, "  • Operações Dinâmicas de Frota (+/-):    %d operações concluídas sem órfãos%n", dynamicFleetOpsCount);
         System.out.printf(Locale.US, "  • Operações de Controlo Manual Semaf.:   %d pedidos seguros executados%n", manualSemaphoreOpsCount);
+        System.out.printf(Locale.US, "  • Preempções / Pedidos de Emergência:    %d%n", emergencyPreemptionsTotal);
         System.out.printf(Locale.US, "  • Mensagens FIPA-ACL Trocadas:           %d mensagens%n", fipaMsgs);
         System.out.printf(Locale.US, "  • Travessias Concluídas nos 9 Nós:       %d travessias%n", totalCrossings);
         System.out.printf(Locale.US, "  • Comprimento Médio / Máximo de Fila:    %.2f / %d veículos%n", avgQueue, maxQueue);
         System.out.printf(Locale.US, "  • Violações de Sinal Vermelho:           %d%n", redViolations);
         System.out.printf(Locale.US, "  • Verdes Incompatíveis Simultâneos:      %d%n", incompatibleGreensDetected);
-        System.out.printf(Locale.US, "  • Correspondência 1:1 Visual <-> JADE:   %s%n",
-                fleet.verifyOneToOneCorrespondence() ? "100% ÍNTEGRA" : "FALHOU");
+        System.out.printf(Locale.US, "  • Correspondência 1:1 Visual <-> JADE:   %s%n", oneToOneOk ? "100% ÍNTEGRA" : "FALHOU");
+        System.out.printf(Locale.US, "  • Verificação Global dos 10 Critérios:   %s%n", allChecksPassed ? "APROVADA (EXIT 0)" : "REPROVADA (EXIT 1)");
         System.out.println("================================================================================\n");
+
+        return allChecksPassed;
     }
 }
