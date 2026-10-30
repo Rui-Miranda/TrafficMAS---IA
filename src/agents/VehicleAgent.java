@@ -24,6 +24,7 @@ import jade.lang.acl.ACLMessage;
 import jade.lang.acl.MessageTemplate;
 import metrics.TrafficMetricsCollector;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -381,24 +382,238 @@ public class VehicleAgent extends Agent {
         return bestCandidate;
     }
 
+    // =========================================================================
+    // FASE 6.2-C — PEDIDOS DO OPERADOR AO AGENTE VEÍCULO (DESTINO E DIREÇÃO)
+    // =========================================================================
+
+    public static class DestinationChangeResult {
+        public final boolean success;
+        public final boolean accepted;
+        public final String message;
+        public final int oldDestination;
+        public final int newDestination;
+        public final List<Integer> routePath;
+        public final AStarPathfinder.RouteResult recalculatedRoute;
+
+        public DestinationChangeResult(boolean success, String message, int oldDestination, int newDestination, List<Integer> routePath) {
+            this(success, message, oldDestination, newDestination, routePath, null);
+        }
+
+        public DestinationChangeResult(boolean success, String message, int oldDestination, int newDestination,
+                                       List<Integer> routePath, AStarPathfinder.RouteResult recalculatedRoute) {
+            this.success = success;
+            this.accepted = success;
+            this.message = message;
+            this.oldDestination = oldDestination;
+            this.newDestination = newDestination;
+            this.routePath = routePath;
+            this.recalculatedRoute = recalculatedRoute;
+        }
+
+        @Override
+        public String toString() {
+            return String.format(Locale.US, "DestinationChangeResult[ok=%b, msg='%s', old=%d, new=%d, route=%s]",
+                    success, message, oldDestination, newDestination, routePath);
+        }
+    }
+
+    public static class ManeuverChangeResult {
+        public final boolean success;
+        public final boolean accepted;
+        public final String message;
+        public final CitySimulationGUI.ManeuverIntent requestedIntent;
+        public final CitySimulationGUI.ManeuverIntent appliedIntent;
+        public final CitySimulationGUI.ManeuverIntent newIntent;
+        public final int intersectionIndex;
+        public final int outgoingDirection;
+        public final AStarPathfinder.RouteResult recalculatedRoute;
+
+        public ManeuverChangeResult(boolean success, String message, CitySimulationGUI.ManeuverIntent requestedIntent,
+                                   CitySimulationGUI.ManeuverIntent appliedIntent, int intersectionIndex, int outgoingDirection) {
+            this(success, message, requestedIntent, appliedIntent, intersectionIndex, outgoingDirection, null);
+        }
+
+        public ManeuverChangeResult(boolean success, String message, CitySimulationGUI.ManeuverIntent requestedIntent,
+                                   CitySimulationGUI.ManeuverIntent appliedIntent, int intersectionIndex, int outgoingDirection,
+                                   AStarPathfinder.RouteResult recalculatedRoute) {
+            this.success = success;
+            this.accepted = success;
+            this.message = message;
+            this.requestedIntent = requestedIntent;
+            this.appliedIntent = appliedIntent;
+            this.newIntent = appliedIntent;
+            this.intersectionIndex = intersectionIndex;
+            this.outgoingDirection = outgoingDirection;
+            this.recalculatedRoute = recalculatedRoute;
+        }
+
+        @Override
+        public String toString() {
+            return String.format(Locale.US, "ManeuverChangeResult[ok=%b, msg='%s', req=%s, app=%s, inter=%d, outDir=%d]",
+                    success, message, requestedIntent, appliedIntent, intersectionIndex, outgoingDirection);
+        }
+    }
+
+    /**
+     * Processa um pedido do operador para alterar o destino do veículo.
+     * O agente valida autonomamente se o destino é válido e alcançável via A* + Manhattan.
+     */
+    public synchronized DestinationChangeResult requestDestinationChange(int newDestinationNode) {
+        NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
+        int maxNodes = topo.getIntersectionCount();
+        if (newDestinationNode < 0 || newDestinationNode >= maxNodes) {
+            return new DestinationChangeResult(false, "Cruzamento destino inválido (" + newDestinationNode + ").",
+                    this.destinationNode, newDestinationNode, null);
+        }
+        if (newDestinationNode == this.destinationNode) {
+            List<Integer> currentPath = (this.activeRoute != null && this.activeRoute.nodePath != null)
+                    ? this.activeRoute.nodePath : Collections.emptyList();
+            return new DestinationChangeResult(false, "O veículo já tem o cruzamento C" + (newDestinationNode + 1)
+                    + " como destino ativo.", this.destinationNode, newDestinationNode, currentPath);
+        }
+
+        RoadNetworkGraph graph = TrafficEnvironment.getInstance().getRoadGraph();
+        VehiclePerception p = (this.lastPerception != null) ? this.lastPerception
+                : VehicleControlGateway.getInstance().getLatestPerception(getLocalName());
+        int startNode = (p != null && p.getApproachingIntersection() >= 0)
+                ? p.getApproachingIntersection()
+                : this.originNode;
+        int currentDir = (p != null) ? p.getDirection() : this.visualDirection;
+
+        AStarPathfinder.RouteResult newRoute = AStarPathfinder.findPathAStar(graph, startNode, newDestinationNode, currentDir, heuristic);
+        if (newRoute == null || !newRoute.reachable) {
+            return new DestinationChangeResult(false, "Não existe percurso A* alcançável para C" + (newDestinationNode + 1)
+                    + " a partir da posição atual do veículo.", this.destinationNode, newDestinationNode, null);
+        }
+
+        int oldDest = this.destinationNode;
+        this.destinationNode = newDestinationNode;
+        this.activeRoute = newRoute;
+        this.routeGraphVersion = graph.getGraphVersion();
+        this.routeRecalculationsCount++;
+        senseReasonAct();
+
+        return new DestinationChangeResult(true, "Destino alterado com sucesso para C" + (newDestinationNode + 1)
+                + " (" + topo.getIntersectionName(newDestinationNode) + "). Nova rota A*: " + newRoute.nodePath,
+                oldDest, newDestinationNode, newRoute.nodePath, newRoute);
+    }
+
+    /**
+     * Processa um pedido do operador para forçar uma manobra (GO_STRAIGHT, TURN_LEFT, TURN_RIGHT)
+     * no próximo cruzamento. O agente valida no grafo rodoviário se a via de saída existe e é alcançável.
+     */
+    public synchronized ManeuverChangeResult requestManeuverChange(CitySimulationGUI.ManeuverIntent requestedIntent) {
+        if (requestedIntent == null) {
+            return new ManeuverChangeResult(false, "Manobra solicitada nula.", null, this.plannedIntent, -1, -1);
+        }
+
+        VehiclePerception p = (this.lastPerception != null) ? this.lastPerception
+                : VehicleControlGateway.getInstance().getLatestPerception(getLocalName());
+        if (p == null) {
+            CitySimulationGUI.VisualVehicle vv = (CitySimulationGUI.getInstance() != null)
+                    ? CitySimulationGUI.getInstance().getVisualVehicle(getLocalName()) : null;
+            if (vv != null) {
+                int appro = TrafficEnvironment.getInstance().getTopology().getTargetIntersection(vv.x, vv.y, vv.direction);
+                p = new VehiclePerception(getLocalName(), vv.x, vv.y, vv.currentSpeed, vv.maxSpeed,
+                        vv.direction, vv.laneIndex, vv.inIntersection, appro, 100.0,
+                        CitySimulationGUI.LightState.GREEN, 9999.0, -1.0, 0L, 1.0,
+                        System.currentTimeMillis(), 0L);
+            }
+        }
+        if (p == null) {
+            return new ManeuverChangeResult(false, "Sem perceção sensorial ativa do veículo para validar manobra.",
+                    requestedIntent, this.plannedIntent, -1, -1);
+        }
+        if (p.isInIntersection()) {
+            return new ManeuverChangeResult(false, "Viatura já se encontra no interior do cruzamento; mudança de direção bloqueada por segurança física.",
+                    requestedIntent, this.plannedIntent, p.getApproachingIntersection(), -1);
+        }
+
+        int approachingIdx = p.getApproachingIntersection();
+        if (approachingIdx < 0) {
+            return new ManeuverChangeResult(false, "Viatura não está a aproximar-se de nenhum cruzamento da rede urbana.",
+                    requestedIntent, this.plannedIntent, -1, -1);
+        }
+
+        int inDir = p.getDirection();
+        int outDir = determineOutgoingDirection(inDir, requestedIntent);
+
+        RoadNetworkGraph graph = TrafficEnvironment.getInstance().getRoadGraph();
+        RoadNetworkGraph.RoadSegment targetSeg = null;
+        for (RoadNetworkGraph.RoadSegment seg : graph.getOutgoingSegments(approachingIdx)) {
+            if (seg.direction == outDir && !seg.isBlocked()) {
+                targetSeg = seg;
+                break;
+            }
+        }
+
+        NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
+        String interName = topo.getIntersectionName(approachingIdx);
+
+        if (targetSeg == null) {
+            String dirName = (outDir == 0 ? "Sul" : (outDir == 1 ? "Norte" : (outDir == 2 ? "Este" : "Oeste")));
+            return new ManeuverChangeResult(false, "Manobra " + requestedIntent + " impossível: Cruzamento " + interName
+                    + " não possui saída para " + dirName + " (bordo da cidade ou via bloqueada).",
+                    requestedIntent, this.plannedIntent, approachingIdx, outDir);
+        }
+
+        // A manobra é fisicamente e topologicamente válida
+        AStarPathfinder.RouteResult subRoute = AStarPathfinder.findPathAStar(graph, targetSeg.toNodeId, this.destinationNode, outDir, heuristic);
+        List<Integer> fullNodes = new ArrayList<>();
+        fullNodes.add(approachingIdx);
+        List<RoadNetworkGraph.RoadSegment> fullSegments = new ArrayList<>();
+        fullSegments.add(targetSeg);
+        List<CitySimulationGUI.ManeuverIntent> fullManeuvers = new ArrayList<>();
+        fullManeuvers.add(requestedIntent);
+
+        double totalCost = targetSeg.lengthPx;
+        if (subRoute != null && subRoute.reachable) {
+            fullNodes.addAll(subRoute.nodePath);
+            fullSegments.addAll(subRoute.segmentPath);
+            fullManeuvers.addAll(subRoute.maneuversAtNodes);
+            totalCost += subRoute.totalCost;
+        } else {
+            fullNodes.add(targetSeg.toNodeId);
+        }
+
+        this.plannedIntent = requestedIntent;
+        this.desiredLane = (requestedIntent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) ? 0 : 1;
+        this.activeRoute = new AStarPathfinder.RouteResult(
+                "A*-ManeuverOverride", true, approachingIdx, this.destinationNode,
+                totalCost, fullNodes, fullSegments, fullManeuvers, 1, graph.getGraphVersion());
+        this.routeGraphVersion = graph.getGraphVersion();
+        this.routeRecalculationsCount++;
+        senseReasonAct();
+
+        return new ManeuverChangeResult(true, "Manobra " + requestedIntent + " aceite pelo agente. Alinhamento com cruzamento "
+                + interName + " em curso (próximo nó: C" + (targetSeg.toNodeId + 1) + ").",
+                requestedIntent, this.plannedIntent, approachingIdx, outDir, this.activeRoute);
+    }
+
+    private static int determineOutgoingDirection(int inDir, CitySimulationGUI.ManeuverIntent intent) {
+        if (intent == CitySimulationGUI.ManeuverIntent.GO_STRAIGHT) {
+            return inDir;
+        }
+        switch (inDir) {
+            case 0: // N->S (desce)
+                return (intent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) ? 3 : 2; // R: Oeste (3), L: Este (2)
+            case 1: // S->N (sobe)
+                return (intent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) ? 2 : 3; // R: Este (2), L: Oeste (3)
+            case 2: // W->E (direita)
+                return (intent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) ? 0 : 1; // R: Sul (0), L: Norte (1)
+            case 3: // E->W (esquerda)
+                return (intent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) ? 1 : 0; // R: Norte (1), L: Sul (0)
+            default:
+                return inDir;
+        }
+    }
+
     /**
      * Força o replaneamento da rota do veículo para um novo destino especificado (pela aplicação ou operador).
      */
     public synchronized boolean assignNewDestination(int newDestinationNode) {
-        NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
-        if (newDestinationNode < 0 || newDestinationNode >= topo.getIntersectionCount() || newDestinationNode == this.destinationNode) {
-            return false;
-        }
-        this.destinationNode = newDestinationNode;
-        RoadNetworkGraph graph = TrafficEnvironment.getInstance().getRoadGraph();
-        int startNode = (this.lastPerception != null && this.lastPerception.getApproachingIntersection() >= 0)
-                ? this.lastPerception.getApproachingIntersection()
-                : this.originNode;
-        this.activeRoute = AStarPathfinder.findPathAStar(graph, startNode, this.destinationNode, this.visualDirection, heuristic);
-        this.routeGraphVersion = graph.getGraphVersion();
-        this.routeRecalculationsCount++;
-        senseReasonAct();
-        return this.activeRoute.reachable;
+        DestinationChangeResult res = requestDestinationChange(newDestinationNode);
+        return res.success;
     }
 
     /**

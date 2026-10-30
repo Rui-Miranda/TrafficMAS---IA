@@ -135,7 +135,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [14/14] A executar suite de validação da Fase 6.2 (Gestão Interativa 50 Veículos e Controlo Manual Seguro)...
+echo [14/16] A executar suite de validação da Fase 6.2 (Gestão Interativa 50 Veículos e Controlo Manual Seguro)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase62ValidationTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -145,7 +145,27 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo [15/16] A executar suite de autonomia dos veículos (Fase 6.2-D)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.VehicleAutonomyTestSuite
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Testes de Autonomia dos Veículos (Fase 6.2-D) falharam!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
+echo [16/16] A executar suite de validação da Fase 6.2-C (Interface Responsiva, Zoom, Seleção e A*)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase62CValidationTestSuite
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Testes da Fase 6.2-C falharam!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
 echo ================================================================================
-echo    TODAS AS 13 SUITES DE TESTES (158 TESTES - FASES 1 A 6.2) FORAM CONCLUÍDAS!
+echo    TODAS AS 15 SUITES DE TESTES (199 TESTES - FASES 1 A 6.2-C) FORAM CONCLUÍDAS!
 echo ================================================================================
 pause

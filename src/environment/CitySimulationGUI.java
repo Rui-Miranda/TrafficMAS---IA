@@ -19,6 +19,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
+
+import agents.VehicleAgent;
+import jade.core.Agent;
 
 /**
  * Interface Gráfica Urbana Parametrizável (2×2 e 3×3) com Navegação A* e Cinemática Contínua (Fase 6.1).
@@ -184,6 +188,39 @@ public class CitySimulationGUI {
     private JLabel lblManualStatus;
     private volatile String lastManualActionMessage = "Modo Automático em todos os cruzamentos (Clique num cruzamento)";
 
+    // =========================================================================
+    // FASE 6.2-C — PAINEL LATERAL RESPONSIVO, ZOOM E INSPEÇÃO INTERATIVA
+    // =========================================================================
+    private JScrollPane mapScrollPane;
+    private JPanel lateralDashboardPanel;
+    private JScrollPane lateralScrollPane;
+
+    // Zoom (0.4x a 2.5x)
+    private volatile double zoomScale = 1.0;
+    private JLabel lblZoom;
+    private JButton btnZoomIn;
+    private JButton btnZoomOut;
+    private JButton btnZoomReset;
+    private JButton btnZoomFit;
+
+    // Seleção Interativa de Veículos e Inspeção
+    private volatile String selectedVehicleId = null;
+    private JLabel lblSelectedVehicleInfo;
+    private JComboBox<String> comboDestination;
+    private JButton btnApplyDestination;
+    private JButton btnManeuverStraight;
+    private JButton btnManeuverLeft;
+    private JButton btnManeuverRight;
+    private JLabel lblVehicleActionFeedback;
+    private volatile String lastVehicleActionFeedback = "Nenhum veículo selecionado. Clique num veículo no mapa.";
+
+    // Controlos em Lote de Frota
+    private JButton btnBatchAdd5;
+    private JButton btnBatchRemove5;
+
+    // Indicadores de Emergência
+    private JLabel lblEmergencyStatus;
+
     // Executor assíncrono dedicado para garantir que ações JADE nunca bloqueiam o EDT do Swing
     private final ExecutorService guiActionExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "TrafficMAS-GUI-Worker");
@@ -229,18 +266,37 @@ public class CitySimulationGUI {
         installCanvasMouseInteraction();
 
         initInteractiveControlBar();
+        initLateralDashboard();
         refreshFleetControlState();
+        refreshVehicleInspectionState();
 
         if (!effectiveHeadless) {
             windowFrame = new JFrame("TrafficMAS — Intelligent Multi-Agent Urban Simulation ("
-                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation | Fase 6.2)");
+                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation | Fase 6.2-C)");
             windowFrame.setLayout(new BorderLayout());
-            windowFrame.add(cityPanel, BorderLayout.CENTER);
-            windowFrame.add(controlBarPanel, BorderLayout.SOUTH);
-            windowFrame.setSize(topology.getWorldWidth(), topology.getWorldHeight() + CONTROL_BAR_HEIGHT);
+
+            mapScrollPane = new JScrollPane(cityPanel);
+            mapScrollPane.setBorder(BorderFactory.createEmptyBorder());
+            mapScrollPane.getHorizontalScrollBar().setUnitIncrement(16);
+            mapScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+
+            windowFrame.add(mapScrollPane, BorderLayout.CENTER);
+            windowFrame.add(lateralScrollPane, BorderLayout.EAST);
+
+            // Redimensionamento responsivo respeitando os limites utilizáveis do monitor
+            Rectangle maxBounds = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+            int availW = Math.max(1024, maxBounds.width - 24);
+            int availH = Math.max(680, maxBounds.height - 36);
+            int targetW = Math.min(availW, topology.getWorldWidth() + 440);
+            int targetH = Math.min(availH, topology.getWorldHeight() + 40);
+            windowFrame.setSize(targetW, targetH);
             windowFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             windowFrame.setLocationRelativeTo(null);
             windowFrame.setResizable(true);
+
+            if (targetH < topology.getWorldHeight() || targetW < topology.getWorldWidth() + 400) {
+                fitMapToWindow();
+            }
 
             // Loop de simulação a ~30 FPS (ativo em modo gráfico)
             simulationTimer = new Timer(30, e -> {
@@ -263,6 +319,7 @@ public class CitySimulationGUI {
                 }
                 if (tickCounter % 5 == 0) {
                     refreshManualControlState();
+                    refreshVehicleInspectionState();
                 }
                 calculateFps();
                 updatePositions();
@@ -304,9 +361,327 @@ public class CitySimulationGUI {
         cityPanel.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
-                selectIntersectionByClick(e.getX(), e.getY());
+                handleCanvasClick(e.getX(), e.getY());
             }
         });
+    }
+
+    public void handleCanvasClick(int mouseX, int mouseY) {
+        int worldX = (zoomScale != 1.0) ? (int) Math.round(mouseX / zoomScale) : mouseX;
+        int worldY = (zoomScale != 1.0) ? (int) Math.round(mouseY / zoomScale) : mouseY;
+
+        // 1. Prioridade: Deteção de clique em veículo
+        VisualVehicle hitVehicle = hitTestVehicle(worldX, worldY);
+        if (hitVehicle != null) {
+            selectVehicle(hitVehicle.id);
+            return;
+        }
+
+        // 2. Deteção de clique em cruzamento ou semáforo
+        int hitInter = hitTestIntersection(worldX, worldY);
+        if (hitInter >= 0) {
+            selectIntersection(hitInter);
+            return;
+        }
+
+        // 3. Fallback com coordenadas brutas (ex: HUD)
+        if (hitTestIntersection(mouseX, mouseY) >= 0) {
+            selectIntersection(hitTestIntersection(mouseX, mouseY));
+        }
+    }
+
+    private JPanel createCardPanel(String title) {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(new Color(34, 42, 54));
+        TitledBorder border = BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(new Color(65, 80, 105), 1),
+                " " + title + " ",
+                TitledBorder.LEFT,
+                TitledBorder.TOP,
+                new Font("Segoe UI", Font.BOLD, 10),
+                new Color(255, 205, 70)
+        );
+        panel.setBorder(BorderFactory.createCompoundBorder(border, new EmptyBorder(5, 7, 7, 7)));
+        panel.setMaximumSize(new Dimension(410, 32767));
+        return panel;
+    }
+
+    private String[] buildDestinationComboItems() {
+        int count = topology.getIntersectionCount();
+        String[] items = new String[count];
+        for (int i = 0; i < count; i++) {
+            items[i] = topology.getIntersectionDisplayLabel(i);
+        }
+        return items;
+    }
+
+    private void initLateralDashboard() {
+        lateralDashboardPanel = new JPanel();
+        lateralDashboardPanel.setLayout(new BoxLayout(lateralDashboardPanel, BoxLayout.Y_AXIS));
+        lateralDashboardPanel.setBackground(new Color(24, 30, 40));
+        lateralDashboardPanel.setBorder(new EmptyBorder(8, 8, 8, 8));
+
+        // 1. Header Card (ML Status + Zoom)
+        JPanel cardHeader = createCardPanel("SISTEMA & AMBIENTE");
+
+        JLabel lblTitle = new JLabel("TRAFFICMAS — CONTROLO OPERACIONAL");
+        lblTitle.setFont(new Font("Segoe UI", Font.BOLD, 11));
+        lblTitle.setForeground(Color.WHITE);
+        lblTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPanel mlBannerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        mlBannerPanel.setBackground(new Color(55, 42, 20));
+        mlBannerPanel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(230, 160, 30), 1),
+                new EmptyBorder(2, 5, 2, 5)));
+        mlBannerPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JLabel lblMl = new JLabel("ML 3×3 — Validação Pendente (Modelo 2x2 Preservado)");
+        lblMl.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        lblMl.setForeground(new Color(255, 205, 80));
+        mlBannerPanel.add(lblMl);
+
+        JLabel lblJadeCount = new JLabel("Agentes JADE: 73 (50 Normais | 3 Prioritários | 18 Semáforos | 2 Centrais)");
+        lblJadeCount.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblJadeCount.setForeground(new Color(180, 200, 225));
+        lblJadeCount.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // Zoom Toolbar
+        JPanel zoomRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        zoomRow.setOpaque(false);
+        zoomRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        lblZoom = new JLabel("Zoom: 100%");
+        lblZoom.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        lblZoom.setForeground(new Color(200, 215, 235));
+
+        btnZoomOut = new JButton("[-] Zoom");
+        btnZoomOut.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnZoomOut.setFocusPainted(false);
+        btnZoomOut.addActionListener(e -> zoomOut());
+
+        btnZoomReset = new JButton("100%");
+        btnZoomReset.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnZoomReset.setFocusPainted(false);
+        btnZoomReset.addActionListener(e -> zoomReset());
+
+        btnZoomIn = new JButton("[+] Zoom");
+        btnZoomIn.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnZoomIn.setFocusPainted(false);
+        btnZoomIn.addActionListener(e -> zoomIn());
+
+        btnZoomFit = new JButton("Ajustar");
+        btnZoomFit.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnZoomFit.setFocusPainted(false);
+        btnZoomFit.addActionListener(e -> fitMapToWindow());
+
+        zoomRow.add(lblZoom);
+        zoomRow.add(btnZoomOut);
+        zoomRow.add(btnZoomReset);
+        zoomRow.add(btnZoomIn);
+        zoomRow.add(btnZoomFit);
+
+        cardHeader.add(lblTitle);
+        cardHeader.add(Box.createVerticalStrut(4));
+        cardHeader.add(mlBannerPanel);
+        cardHeader.add(Box.createVerticalStrut(4));
+        cardHeader.add(lblJadeCount);
+        cardHeader.add(Box.createVerticalStrut(6));
+        cardHeader.add(zoomRow);
+
+        // 2. Fleet Management Card
+        JPanel cardFleet = createCardPanel("GESTÃO DA FROTA MULTIAGENTE");
+
+        JPanel fleetCountRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        fleetCountRow.setOpaque(false);
+        fleetCountRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        fleetCountRow.add(lblNormalCount);
+        fleetCountRow.add(lblPriorityCount);
+
+        JPanel fleetBtnRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        fleetBtnRow1.setOpaque(false);
+        fleetBtnRow1.setAlignmentX(Component.LEFT_ALIGNMENT);
+        fleetBtnRow1.add(btnAddVehicle);
+        fleetBtnRow1.add(btnRemoveVehicle);
+        fleetBtnRow1.add(comboRemoveTarget);
+
+        JPanel fleetBtnRow2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        fleetBtnRow2.setOpaque(false);
+        fleetBtnRow2.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        btnBatchAdd5 = new JButton("+5 Lote");
+        btnBatchAdd5.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnBatchAdd5.setFocusPainted(false);
+        btnBatchAdd5.setToolTipText("Adicionar 5 veículos normais autónomos (até ao limite de 50)");
+        btnBatchAdd5.addActionListener(e -> triggerBatchAddAsync(5));
+
+        btnBatchRemove5 = new JButton("-5 Lote");
+        btnBatchRemove5.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnBatchRemove5.setFocusPainted(false);
+        btnBatchRemove5.setToolTipText("Remover 5 veículos normais autónomos");
+        btnBatchRemove5.addActionListener(e -> triggerBatchRemoveAsync(5));
+
+        fleetBtnRow2.add(btnBatchAdd5);
+        fleetBtnRow2.add(btnBatchRemove5);
+
+        lblFleetFeedback.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        cardFleet.add(fleetCountRow);
+        cardFleet.add(Box.createVerticalStrut(4));
+        cardFleet.add(fleetBtnRow1);
+        cardFleet.add(Box.createVerticalStrut(4));
+        cardFleet.add(fleetBtnRow2);
+        cardFleet.add(Box.createVerticalStrut(4));
+        cardFleet.add(lblFleetFeedback);
+
+        // 3. Vehicle Inspection & Action Card
+        JPanel cardVehicle = createCardPanel("INSPEÇÃO & CONTROLO DO VEÍCULO");
+
+        lblSelectedVehicleInfo = new JLabel("<html><i>Nenhum veículo selecionado.</i><br><font color='#a0b0c5'>Clique diretamente numa viatura no mapa para inspecionar e comandar o agente.</font></html>");
+        lblSelectedVehicleInfo.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblSelectedVehicleInfo.setForeground(new Color(215, 225, 240));
+        lblSelectedVehicleInfo.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPanel destRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        destRow.setOpaque(false);
+        destRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel lblDestTag = new JLabel("Destino:");
+        lblDestTag.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        lblDestTag.setForeground(new Color(255, 215, 70));
+
+        comboDestination = new JComboBox<>(buildDestinationComboItems());
+        comboDestination.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        comboDestination.setPreferredSize(new Dimension(110, 22));
+
+        btnApplyDestination = new JButton("Alterar Destino");
+        btnApplyDestination.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnApplyDestination.setFocusPainted(false);
+        btnApplyDestination.setEnabled(false);
+        btnApplyDestination.addActionListener(e -> {
+            if (selectedVehicleId != null && comboDestination != null) {
+                int targetIdx = comboDestination.getSelectedIndex();
+                triggerDestinationChangeAsync(selectedVehicleId, targetIdx);
+            }
+        });
+
+        destRow.add(lblDestTag);
+        destRow.add(comboDestination);
+        destRow.add(btnApplyDestination);
+
+        JPanel maneuverRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        maneuverRow.setOpaque(false);
+        maneuverRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel lblManeuverTag = new JLabel("Manobra:");
+        lblManeuverTag.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        lblManeuverTag.setForeground(new Color(95, 195, 255));
+
+        btnManeuverStraight = new JButton("[S] Frente");
+        btnManeuverStraight.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnManeuverStraight.setFocusPainted(false);
+        btnManeuverStraight.setEnabled(false);
+        btnManeuverStraight.addActionListener(e -> {
+            if (selectedVehicleId != null) {
+                triggerManeuverChangeAsync(selectedVehicleId, ManeuverIntent.GO_STRAIGHT);
+            }
+        });
+
+        btnManeuverLeft = new JButton("[L] Esq.");
+        btnManeuverLeft.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnManeuverLeft.setFocusPainted(false);
+        btnManeuverLeft.setEnabled(false);
+        btnManeuverLeft.addActionListener(e -> {
+            if (selectedVehicleId != null) {
+                triggerManeuverChangeAsync(selectedVehicleId, ManeuverIntent.TURN_LEFT);
+            }
+        });
+
+        btnManeuverRight = new JButton("[R] Dir.");
+        btnManeuverRight.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btnManeuverRight.setFocusPainted(false);
+        btnManeuverRight.setEnabled(false);
+        btnManeuverRight.addActionListener(e -> {
+            if (selectedVehicleId != null) {
+                triggerManeuverChangeAsync(selectedVehicleId, ManeuverIntent.TURN_RIGHT);
+            }
+        });
+
+        maneuverRow.add(lblManeuverTag);
+        maneuverRow.add(btnManeuverStraight);
+        maneuverRow.add(btnManeuverLeft);
+        maneuverRow.add(btnManeuverRight);
+
+        lblVehicleActionFeedback = new JLabel("Ação: " + lastVehicleActionFeedback);
+        lblVehicleActionFeedback.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblVehicleActionFeedback.setForeground(new Color(210, 220, 235));
+        lblVehicleActionFeedback.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        cardVehicle.add(lblSelectedVehicleInfo);
+        cardVehicle.add(Box.createVerticalStrut(6));
+        cardVehicle.add(destRow);
+        cardVehicle.add(Box.createVerticalStrut(4));
+        cardVehicle.add(maneuverRow);
+        cardVehicle.add(Box.createVerticalStrut(4));
+        cardVehicle.add(lblVehicleActionFeedback);
+
+        // 4. Semaphore Control Card
+        JPanel cardSemaphore = createCardPanel("CONTROLO MANUAL SEGURO DE SEMÁFOROS");
+
+        JPanel crossingRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        crossingRow.setOpaque(false);
+        crossingRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        crossingRow.add(lblSelectedCrossing);
+        crossingRow.add(lblCrossingStates);
+
+        JPanel semBtnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        semBtnRow.setOpaque(false);
+        semBtnRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        semBtnRow.add(btnManualNS);
+        semBtnRow.add(btnManualEW);
+        semBtnRow.add(btnManualAuto);
+
+        lblManualStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        cardSemaphore.add(crossingRow);
+        cardSemaphore.add(Box.createVerticalStrut(4));
+        cardSemaphore.add(semBtnRow);
+        cardSemaphore.add(Box.createVerticalStrut(4));
+        cardSemaphore.add(lblManualStatus);
+
+        // 5. Emergency Status Card
+        JPanel cardEmergency = createCardPanel("FROTA DE EMERGÊNCIA & PRIORIDADES");
+
+        lblEmergencyStatus = new JLabel("<html>"
+                + "🚑 <b>Ambulância</b> (AMBULANCE) — Preempção Semafórica Ativa<br>"
+                + "🚒 <b>Bombeiros</b> (FIRE_TRUCK) — Resposta a Incêndio / Sirene Ligada<br>"
+                + "🚓 <b>Polícia</b> (POLICE) — Patrulhamento Urbano / Preempção Disponível<br>"
+                + "<font color='#ffbf70'>* Cedência de passagem física lateral diferida para Fase 6.3.</font>"
+                + "</html>");
+        lblEmergencyStatus.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblEmergencyStatus.setForeground(new Color(220, 230, 245));
+        lblEmergencyStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        cardEmergency.add(lblEmergencyStatus);
+
+        // Assemble into lateralDashboardPanel with spacing
+        lateralDashboardPanel.add(cardHeader);
+        lateralDashboardPanel.add(Box.createVerticalStrut(6));
+        lateralDashboardPanel.add(cardFleet);
+        lateralDashboardPanel.add(Box.createVerticalStrut(6));
+        lateralDashboardPanel.add(cardVehicle);
+        lateralDashboardPanel.add(Box.createVerticalStrut(6));
+        lateralDashboardPanel.add(cardSemaphore);
+        lateralDashboardPanel.add(Box.createVerticalStrut(6));
+        lateralDashboardPanel.add(cardEmergency);
+        lateralDashboardPanel.add(Box.createVerticalGlue());
+
+        lateralScrollPane = new JScrollPane(lateralDashboardPanel);
+        lateralScrollPane.setPreferredSize(new Dimension(420, topology.getWorldHeight()));
+        lateralScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        lateralScrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        lateralScrollPane.setBorder(BorderFactory.createMatteBorder(0, 1, 0, 0, new Color(50, 65, 85)));
+        lateralScrollPane.getVerticalScrollBar().setUnitIncrement(16);
     }
 
     private void initInteractiveControlBar() {
@@ -431,17 +806,26 @@ public class CitySimulationGUI {
         this.vehicles.clear();
         this.redLightViolationsCount.set(0);
         this.spawnSequence.set(0);
+        this.selectedVehicleId = null;
         if (selectedIntersectionIndex >= newTopology.getIntersectionCount()) {
             selectedIntersectionIndex = 0;
         }
         resetLights();
+        if (comboDestination != null) {
+            comboDestination.removeAllItems();
+            for (String item : buildDestinationComboItems()) {
+                comboDestination.addItem(item);
+            }
+        }
         refreshControlPanels();
         if (!java.awt.GraphicsEnvironment.isHeadless() && windowFrame != null) {
             windowFrame.setTitle("TrafficMAS — Intelligent Multi-Agent Urban Simulation ("
-                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation | Fase 6.2)");
-            windowFrame.setSize(topology.getWorldWidth(), topology.getWorldHeight() + CONTROL_BAR_HEIGHT);
+                    + topology.getRows() + "x" + topology.getCols() + " | A* Navigation | Fase 6.2-C)");
             if (cityPanel != null) {
-                cityPanel.setPreferredSize(new Dimension(topology.getWorldWidth(), topology.getWorldHeight()));
+                cityPanel.setPreferredSize(new Dimension(
+                        (int) Math.round(topology.getWorldWidth() * zoomScale),
+                        (int) Math.round(topology.getWorldHeight() * zoomScale)
+                ));
                 cityPanel.repaint();
             }
         }
@@ -821,6 +1205,7 @@ public class CitySimulationGUI {
     public void refreshControlPanels() {
         refreshFleetControlState();
         refreshManualControlState();
+        refreshVehicleInspectionState();
     }
 
     /**
@@ -1150,7 +1535,12 @@ public class CitySimulationGUI {
      * IMPORTANTE: O clique apenas seleciona o cruzamento para controlo; NUNCA altera diretamente a cor no ecrã.
      */
     public int selectIntersectionByClick(int mouseX, int mouseY) {
-        int hit = hitTestIntersection(mouseX, mouseY);
+        int worldX = (zoomScale != 1.0) ? (int) Math.round(mouseX / zoomScale) : mouseX;
+        int worldY = (zoomScale != 1.0) ? (int) Math.round(mouseY / zoomScale) : mouseY;
+        int hit = hitTestIntersection(worldX, worldY);
+        if (hit < 0 && (worldX != mouseX || worldY != mouseY)) {
+            hit = hitTestIntersection(mouseX, mouseY);
+        }
         if (hit >= 0) {
             this.selectedIntersectionIndex = hit;
             this.lastManualActionMessage = "Cruzamento " + topology.getIntersectionDisplayLabel(hit)
@@ -1251,6 +1641,374 @@ public class CitySimulationGUI {
         }
     }
 
+    /* =========================================================================
+     * FASE 6.2-C — API INTERATIVA DE ZOOM, SELEÇÃO E CONTROLO DE VEÍCULOS
+     * ========================================================================= */
+
+    public double getZoomScale() {
+        return zoomScale;
+    }
+
+    public void setZoomScale(double scale) {
+        this.zoomScale = Math.max(0.4, Math.min(2.5, scale));
+        if (cityPanel != null) {
+            cityPanel.setPreferredSize(new Dimension(
+                    (int) Math.round(topology.getWorldWidth() * zoomScale),
+                    (int) Math.round(topology.getWorldHeight() * zoomScale)
+            ));
+            cityPanel.revalidate();
+            cityPanel.repaint();
+        }
+        if (lblZoom != null) {
+            lblZoom.setText(String.format(Locale.ROOT, "Zoom: %d%%", (int) Math.round(zoomScale * 100)));
+        }
+    }
+
+    public void zoomIn() {
+        setZoomScale(zoomScale + 0.15);
+    }
+
+    public void zoomOut() {
+        setZoomScale(zoomScale - 0.15);
+    }
+
+    public void zoomReset() {
+        setZoomScale(1.0);
+    }
+
+    public void fitMapToWindow() {
+        if (windowFrame != null && cityPanel != null) {
+            int availW = Math.max(200, windowFrame.getContentPane().getWidth() - 440);
+            int availH = Math.max(200, windowFrame.getContentPane().getHeight() - 40);
+            double scaleW = (double) availW / topology.getWorldWidth();
+            double scaleH = (double) availH / topology.getWorldHeight();
+            double fitScale = Math.min(scaleW, scaleH);
+            setZoomScale(fitScale);
+        }
+    }
+
+    public VisualVehicle hitTestVehicle(int worldX, int worldY) {
+        double minDistanceSq = 24.0 * 24.0;
+        VisualVehicle best = null;
+        double bestDistSq = minDistanceSq;
+        for (VisualVehicle v : vehicles) {
+            double dx = v.x - worldX;
+            double dy = v.y - worldY;
+            double distSq = dx * dx + dy * dy;
+            if (distSq <= bestDistSq) {
+                bestDistSq = distSq;
+                best = v;
+            }
+        }
+        return best;
+    }
+
+    public VisualVehicle selectVehicleByClick(int mouseX, int mouseY) {
+        int worldX = (zoomScale != 1.0) ? (int) Math.round(mouseX / zoomScale) : mouseX;
+        int worldY = (zoomScale != 1.0) ? (int) Math.round(mouseY / zoomScale) : mouseY;
+        VisualVehicle hit = hitTestVehicle(worldX, worldY);
+        if (hit == null && (worldX != mouseX || worldY != mouseY)) {
+            hit = hitTestVehicle(mouseX, mouseY);
+        }
+        if (hit != null) {
+            selectVehicle(hit.id);
+        }
+        return hit;
+    }
+
+    public void selectVehicle(String vehicleId) {
+        this.selectedVehicleId = vehicleId;
+        if (vehicleId != null) {
+            VisualVehicle v = getVisualVehicle(vehicleId);
+            String cat = (v != null) ? v.category : "NORMAL";
+            this.lastVehicleActionFeedback = "Veículo " + vehicleId + " [" + cat + "] selecionado.";
+        } else {
+            this.lastVehicleActionFeedback = "Nenhum veículo selecionado. Clique num veículo no mapa.";
+        }
+        if (lblVehicleActionFeedback != null) {
+            lblVehicleActionFeedback.setText("Ação: " + lastVehicleActionFeedback);
+        }
+        refreshVehicleInspectionState();
+        if (cityPanel != null) {
+            cityPanel.repaint();
+        }
+    }
+
+    public void clearVehicleSelection() {
+        selectVehicle(null);
+    }
+
+    public String getSelectedVehicleId() {
+        return selectedVehicleId;
+    }
+
+    public VisualVehicle getSelectedVehicle() {
+        return (selectedVehicleId != null) ? getVisualVehicle(selectedVehicleId) : null;
+    }
+
+    public void refreshVehicleInspectionState() {
+        final String selId = this.selectedVehicleId;
+        final VisualVehicle v = (selId != null) ? getVisualVehicle(selId) : null;
+
+        Runnable uiUpdater = () -> {
+            if (v != null) {
+                String cat = v.category;
+                String status = v.inIntersection ? "No Cruzamento (A virar)" : (v.currentSpeed < 0.2 ? "Travado / Espera" : "Em Movimento");
+                String speedStr = String.format(Locale.ROOT, "%.1f km/h", v.currentSpeed * 10.0);
+                String laneStr = (v.laneIndex == 0) ? "Exterior (Direita)" : "Interior (Esquerda)";
+                String origStr = "C" + (v.originIntersectionId + 1);
+                String destStr = "C" + (v.destinationIntersectionId + 1);
+                String intentStr = v.intent.name();
+
+                StringBuilder routeSb = new StringBuilder();
+                if (v.activeRoute != null && v.activeRoute.nodePath != null && !v.activeRoute.nodePath.isEmpty()) {
+                    for (int i = 0; i < v.activeRoute.nodePath.size(); i++) {
+                        if (i > 0) routeSb.append(" -> ");
+                        routeSb.append("C").append(v.activeRoute.nodePath.get(i) + 1);
+                    }
+                } else {
+                    routeSb.append(origStr).append(" -> ").append(destStr);
+                }
+
+                if (lblSelectedVehicleInfo != null) {
+                    lblSelectedVehicleInfo.setText("<html><b>Veículo:</b> <font color='#5fc3ff'>" + v.id + "</font> (" + cat + ") | <b>Velocidade:</b> " + speedStr + "<br>"
+                            + "<b>Faixa:</b> " + laneStr + " | <b>Estado:</b> " + status + "<br>"
+                            + "<b>Origem:</b> " + origStr + " -> <b>Destino:</b> " + destStr + " | <b>Manobra:</b> " + intentStr + "<br>"
+                            + "<b>Rota A*:</b> <font color='#ffd746'>" + routeSb + "</font></html>");
+                }
+                if (btnApplyDestination != null) btnApplyDestination.setEnabled(true);
+                if (btnManeuverStraight != null) btnManeuverStraight.setEnabled(true);
+                if (btnManeuverLeft != null) btnManeuverLeft.setEnabled(true);
+                if (btnManeuverRight != null) btnManeuverRight.setEnabled(true);
+                if (comboDestination != null && v.destinationIntersectionId >= 0 && v.destinationIntersectionId < comboDestination.getItemCount()) {
+                    if (!comboDestination.hasFocus()) {
+                        comboDestination.setSelectedIndex(v.destinationIntersectionId);
+                    }
+                }
+            } else {
+                if (lblSelectedVehicleInfo != null) {
+                    lblSelectedVehicleInfo.setText("<html><i>Nenhum veículo selecionado.</i><br><font color='#a0b0c5'>Clique diretamente numa viatura no mapa para inspecionar e comandar o agente.</font></html>");
+                }
+                if (btnApplyDestination != null) btnApplyDestination.setEnabled(false);
+                if (btnManeuverStraight != null) btnManeuverStraight.setEnabled(false);
+                if (btnManeuverLeft != null) btnManeuverLeft.setEnabled(false);
+                if (btnManeuverRight != null) btnManeuverRight.setEnabled(false);
+            }
+            if (lblVehicleActionFeedback != null) {
+                lblVehicleActionFeedback.setText("Ação: " + lastVehicleActionFeedback);
+            }
+        };
+
+        if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(uiUpdater);
+        } else {
+            uiUpdater.run();
+        }
+    }
+
+    public VehicleAgent.DestinationChangeResult performInteractiveDestinationChange(String vehicleId, int newDestinationNode) {
+        if (vehicleId == null) {
+            return new VehicleAgent.DestinationChangeResult(false, "Nenhum veículo selecionado", -1, -1, null);
+        }
+        Agent ag = VehicleControlGateway.getInstance().getAgent(vehicleId);
+        if (ag instanceof VehicleAgent) {
+            VehicleAgent vag = (VehicleAgent) ag;
+            VehicleAgent.DestinationChangeResult res = vag.requestDestinationChange(newDestinationNode);
+            this.lastVehicleActionFeedback = "Destino " + vehicleId + ": " + res.message;
+            if (res.accepted) {
+                VisualVehicle vv = getVisualVehicle(vehicleId);
+                if (vv != null) {
+                    vv.destinationIntersectionId = res.newDestination;
+                    if (res.recalculatedRoute != null) {
+                        vv.activeRoute = res.recalculatedRoute;
+                    }
+                }
+            }
+            refreshVehicleInspectionState();
+            if (cityPanel != null) cityPanel.repaint();
+            return res;
+        } else {
+            VisualVehicle vv = getVisualVehicle(vehicleId);
+            if (vv != null) {
+                if (newDestinationNode < 0 || newDestinationNode >= topology.getIntersectionCount()) {
+                    return new VehicleAgent.DestinationChangeResult(false, "Destino inválido: C" + (newDestinationNode + 1), vv.destinationIntersectionId, newDestinationNode, null);
+                }
+                vv.destinationIntersectionId = newDestinationNode;
+                this.lastVehicleActionFeedback = "Destino de " + vehicleId + " alterado para C" + (newDestinationNode + 1);
+                refreshVehicleInspectionState();
+                if (cityPanel != null) cityPanel.repaint();
+                return new VehicleAgent.DestinationChangeResult(true, "Destino atualizado", vv.originIntersectionId, newDestinationNode, null, vv.activeRoute);
+            }
+            return new VehicleAgent.DestinationChangeResult(false, "Agente não encontrado: " + vehicleId, -1, newDestinationNode, null);
+        }
+    }
+
+    public VehicleAgent.ManeuverChangeResult performInteractiveManeuverChange(String vehicleId, ManeuverIntent requestedIntent) {
+        if (vehicleId == null || requestedIntent == null) {
+            return new VehicleAgent.ManeuverChangeResult(false, "Parâmetros inválidos", requestedIntent, requestedIntent, -1, -1);
+        }
+        Agent ag = VehicleControlGateway.getInstance().getAgent(vehicleId);
+        if (ag instanceof VehicleAgent) {
+            VehicleAgent vag = (VehicleAgent) ag;
+            VehicleAgent.ManeuverChangeResult res = vag.requestManeuverChange(requestedIntent);
+            this.lastVehicleActionFeedback = "Manobra " + vehicleId + ": " + res.message;
+            if (res.accepted) {
+                VisualVehicle vv = getVisualVehicle(vehicleId);
+                if (vv != null) {
+                    vv.intent = res.newIntent;
+                    if (res.recalculatedRoute != null) {
+                        vv.activeRoute = res.recalculatedRoute;
+                    }
+                }
+            }
+            refreshVehicleInspectionState();
+            if (cityPanel != null) cityPanel.repaint();
+            return res;
+        } else {
+            VisualVehicle vv = getVisualVehicle(vehicleId);
+            if (vv != null) {
+                vv.intent = requestedIntent;
+                this.lastVehicleActionFeedback = "Manobra de " + vehicleId + " alterada para " + requestedIntent;
+                refreshVehicleInspectionState();
+                if (cityPanel != null) cityPanel.repaint();
+                return new VehicleAgent.ManeuverChangeResult(true, "Manobra atualizada", requestedIntent, requestedIntent, vv.originIntersectionId, -1, vv.activeRoute);
+            }
+            return new VehicleAgent.ManeuverChangeResult(false, "Agente não encontrado: " + vehicleId, requestedIntent, requestedIntent, -1, -1);
+        }
+    }
+
+    public void triggerDestinationChangeAsync(String vehicleId, int newDestinationNode) {
+        if (vehicleId == null) return;
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                performInteractiveDestinationChange(vehicleId, newDestinationNode);
+                SwingUtilities.invokeLater(() -> {
+                    refreshVehicleInspectionState();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            performInteractiveDestinationChange(vehicleId, newDestinationNode);
+            refreshVehicleInspectionState();
+        }
+    }
+
+    public void triggerManeuverChangeAsync(String vehicleId, ManeuverIntent intent) {
+        if (vehicleId == null || intent == null) return;
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                performInteractiveManeuverChange(vehicleId, intent);
+                SwingUtilities.invokeLater(() -> {
+                    refreshVehicleInspectionState();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            performInteractiveManeuverChange(vehicleId, intent);
+            refreshVehicleInspectionState();
+        }
+    }
+
+    public int performBatchAddNormalVehicles(int count) {
+        int added = 0;
+        for (int i = 0; i < count; i++) {
+            FleetLifecycleManager.LifecycleOperationResult res = performInteractiveAddNormalVehicle();
+            if (res.success) {
+                added++;
+            } else {
+                break;
+            }
+        }
+        this.lastFleetActionMessage = "Lote adicionado: +" + added + " normais (Total: "
+                + FleetLifecycleManager.getInstance().getActiveNormalVehicleCount() + "/50)";
+        refreshFleetControlState();
+        if (cityPanel != null) cityPanel.repaint();
+        return added;
+    }
+
+    public int performBatchRemoveNormalVehicles(int count) {
+        int removed = 0;
+        for (int i = 0; i < count; i++) {
+            FleetLifecycleManager.LifecycleOperationResult res = performInteractiveRemoveNormalVehicle(null);
+            if (res.success) {
+                removed++;
+            } else {
+                break;
+            }
+        }
+        this.lastFleetActionMessage = "Lote removido: -" + removed + " normais (Total: "
+                + FleetLifecycleManager.getInstance().getActiveNormalVehicleCount() + "/50)";
+        refreshFleetControlState();
+        if (cityPanel != null) cityPanel.repaint();
+        return removed;
+    }
+
+    public void triggerBatchAddAsync(int count) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                performBatchAddNormalVehicles(count);
+                SwingUtilities.invokeLater(() -> {
+                    refreshControlPanels();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            performBatchAddNormalVehicles(count);
+            refreshControlPanels();
+        }
+    }
+
+    public void triggerBatchRemoveAsync(int count) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            lastPendingGuiTask = guiActionExecutor.submit(() -> {
+                performBatchRemoveNormalVehicles(count);
+                SwingUtilities.invokeLater(() -> {
+                    refreshControlPanels();
+                    if (cityPanel != null) cityPanel.repaint();
+                });
+            });
+        } else {
+            performBatchRemoveNormalVehicles(count);
+            refreshControlPanels();
+        }
+    }
+
+    public JButton getBtnBatchAdd5() {
+        return btnBatchAdd5;
+    }
+
+    public JButton getBtnBatchRemove5() {
+        return btnBatchRemove5;
+    }
+
+    public JButton getBtnApplyDestination() {
+        return btnApplyDestination;
+    }
+
+    public JButton getBtnManeuverStraight() {
+        return btnManeuverStraight;
+    }
+
+    public JButton getBtnManeuverLeft() {
+        return btnManeuverLeft;
+    }
+
+    public JButton getBtnManeuverRight() {
+        return btnManeuverRight;
+    }
+
+    public JComboBox<String> getComboDestination() {
+        return comboDestination;
+    }
+
+    public String getVehicleActionFeedbackText() {
+        return "Ação: " + lastVehicleActionFeedback;
+    }
+
+    public JFrame getWindowFrame() {
+        return windowFrame;
+    }
+
     /**
      * Avança um passo da simulação sincronizando todas as autoridades de segurança semafórica.
      */
@@ -1273,24 +2031,32 @@ public class CitySimulationGUI {
     public boolean exportGuiScreenshot(String filePath) {
         try {
             refreshControlPanels();
-            final int w = topology.getWorldWidth();
+            final int mapW = topology.getWorldWidth();
             final int mapH = topology.getWorldHeight();
-            final int barH = CONTROL_BAR_HEIGHT;
-            final int totalH = mapH + barH;
-            final BufferedImage img = new BufferedImage(w, totalH, BufferedImage.TYPE_INT_RGB);
+            final int lateralW = 420;
+            final int totalW = mapW + lateralW;
+            final int totalH = mapH;
+            final BufferedImage img = new BufferedImage(totalW, totalH, BufferedImage.TYPE_INT_RGB);
 
             Runnable renderTask = () -> {
-                cityPanel.setSize(w, mapH);
+                cityPanel.setSize(mapW, mapH);
                 cityPanel.doLayout();
 
-                controlBarPanel.setSize(w, barH);
-                controlBarPanel.doLayout();
-                for (Component comp : controlBarPanel.getComponents()) {
-                    if (comp instanceof Container) {
-                        comp.doLayout();
-                        for (Component sub : ((Container) comp).getComponents()) {
-                            if (sub instanceof Container) {
-                                sub.doLayout();
+                if (lateralDashboardPanel != null) {
+                    lateralDashboardPanel.setSize(lateralW, totalH);
+                    lateralDashboardPanel.doLayout();
+                    for (Component comp : lateralDashboardPanel.getComponents()) {
+                        if (comp instanceof Container) {
+                            comp.doLayout();
+                            for (Component sub : ((Container) comp).getComponents()) {
+                                if (sub instanceof Container) {
+                                    sub.doLayout();
+                                    for (Component sub2 : ((Container) sub).getComponents()) {
+                                        if (sub2 instanceof Container) {
+                                            sub2.doLayout();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1298,8 +2064,10 @@ public class CitySimulationGUI {
 
                 Graphics2D g2 = img.createGraphics();
                 cityPanel.paint(g2);
-                g2.translate(0, mapH);
-                controlBarPanel.paint(g2);
+                if (lateralDashboardPanel != null) {
+                    g2.translate(mapW, 0);
+                    lateralDashboardPanel.paint(g2);
+                }
                 g2.dispose();
             };
 
@@ -2151,34 +2919,96 @@ public class CitySimulationGUI {
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
-            Graphics2D g2 = (Graphics2D) g;
+            Graphics2D g2 = (Graphics2D) g.create();
+            try {
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+                g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                g2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
 
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            g2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+                if (zoomScale != 1.0) {
+                    g2.scale(zoomScale, zoomScale);
+                }
 
-            int width = getWidth();
-            int height = getHeight();
+                int worldW = topology.getWorldWidth();
+                int worldH = topology.getWorldHeight();
 
-            // 1. Terreno Urbano Claro Diurno
-            g2.setColor(new Color(230, 234, 240));
-            g2.fillRect(0, 0, width, height);
+                // 1. Terreno Urbano Claro Diurno
+                g2.setColor(new Color(230, 234, 240));
+                g2.fillRect(0, 0, worldW, worldH);
 
-            // 2. Quarteirões Urbanos com Zonas Verdes e Edifícios (parametrizado para 2×2 ou 3×3)
-            drawUrbanBlocks(g2, width, height);
+                // 2. Quarteirões Urbanos com Zonas Verdes e Edifícios (parametrizado para 2×2 ou 3×3)
+                drawUrbanBlocks(g2, worldW, worldH);
 
-            // 3. Avenidas de 4 Faixas com Asfalto Limpo no Centro das Interseções
-            drawRoadsAndMarkings(g2, width, height);
+                // 3. Avenidas de 4 Faixas com Asfalto Limpo no Centro das Interseções
+                drawRoadsAndMarkings(g2, worldW, worldH);
 
-            // 4. Semáforos montados no bordo direito de cada fluxo com postes e luzes
-            drawIntersectionsAndLights(g2);
+                // 4. Semáforos montados no bordo direito de cada fluxo com postes e luzes
+                drawIntersectionsAndLights(g2);
 
-            // 5. Veículos com Rotação Suave Dinâmica e Luzes
-            drawVehicles(g2);
+                // 5. Rota A* da Viatura Selecionada (se houver)
+                drawSelectedVehicleRoute(g2);
 
-            // 6. HUD / Dashboard Superior
-            drawHUD(g2, width);
+                // 6. Veículos com Rotação Suave Dinâmica e Luzes
+                drawVehicles(g2);
+
+                // 7. HUD / Dashboard Superior
+                drawHUD(g2, worldW);
+            } finally {
+                g2.dispose();
+            }
+        }
+
+        private void drawSelectedVehicleRoute(Graphics2D g2) {
+            if (selectedVehicleId == null) return;
+            VisualVehicle v = getVisualVehicle(selectedVehicleId);
+            if (v == null || v.activeRoute == null || v.activeRoute.nodePath == null || v.activeRoute.nodePath.isEmpty()) {
+                return;
+            }
+
+            List<Integer> nodes = v.activeRoute.nodePath;
+            Stroke oldStroke = g2.getStroke();
+            Color oldColor = g2.getColor();
+
+            float[] dash = { 8.0f, 6.0f };
+            float dashPhase = (float) ((tickCounter * 2) % 14);
+            g2.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10.0f, dash, dashPhase));
+            g2.setColor(new Color(0, 220, 255, 190)); // Cyan glow
+
+            double prevX = v.x;
+            double prevY = v.y;
+
+            for (int i = 0; i < nodes.size(); i++) {
+                int nodeId = nodes.get(i);
+                if (nodeId >= 0 && nodeId < topology.getIntersectionCount()) {
+                    double cx = topology.getIntersectionCenterX(nodeId);
+                    double cy = topology.getIntersectionCenterY(nodeId);
+                    g2.drawLine((int) Math.round(prevX), (int) Math.round(prevY), (int) Math.round(cx), (int) Math.round(cy));
+                    prevX = cx;
+                    prevY = cy;
+                }
+            }
+
+            // Marcadores de Waypoint dourados
+            for (int i = 0; i < nodes.size(); i++) {
+                int nodeId = nodes.get(i);
+                if (nodeId >= 0 && nodeId < topology.getIntersectionCount()) {
+                    double cx = topology.getIntersectionCenterX(nodeId);
+                    double cy = topology.getIntersectionCenterY(nodeId);
+                    g2.setStroke(new BasicStroke(1.5f));
+                    g2.setColor(new Color(255, 215, 0, 230));
+                    g2.fillOval((int) cx - 9, (int) cy - 9, 18, 18);
+                    g2.setColor(new Color(30, 30, 30));
+                    g2.drawOval((int) cx - 9, (int) cy - 9, 18, 18);
+                    g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+                    String wpLabel = "C" + (nodeId + 1);
+                    int strW = g2.getFontMetrics().stringWidth(wpLabel);
+                    g2.drawString(wpLabel, (int) cx - strW / 2, (int) cy + 3);
+                }
+            }
+
+            g2.setStroke(oldStroke);
+            g2.setColor(oldColor);
         }
 
         private void drawUrbanBlocks(Graphics2D g2, int width, int height) {
@@ -2466,6 +3296,15 @@ public class CitySimulationGUI {
                 g2.setColor(new Color(0, 0, 0, 90));
                 g2.fill(new RoundRectangle2D.Double(-vLength / 2.0 + 2, -vWidth / 2.0 + 3, vLength, vWidth, 6, 6));
 
+                // Halo e anel dourado de seleção de viatura
+                if (v.id.equals(selectedVehicleId)) {
+                    g2.setColor(new Color(255, 215, 0, 80));
+                    g2.fillOval(-vLength / 2 - 8, -vWidth / 2 - 8, vLength + 16, vWidth + 16);
+                    g2.setColor(new Color(255, 215, 0, 240));
+                    g2.setStroke(new BasicStroke(2.5f));
+                    g2.drawOval(-vLength / 2 - 5, -vWidth / 2 - 5, vLength + 10, vWidth + 10);
+                }
+
                 // Carroçaria
                 g2.setColor(v.color);
                 g2.fill(new RoundRectangle2D.Double(-vLength / 2.0, -vWidth / 2.0, vLength, vWidth, 6, 6));
@@ -2505,13 +3344,38 @@ public class CitySimulationGUI {
 
                 g2.setTransform(old);
 
-                // Etiqueta compacta com ID, Manobra A* e Destino
-                g2.setColor(v.isEmergency ? new Color(180, 15, 25) : new Color(20, 25, 35));
-                g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
-                String labelIntent = (v.intent == ManeuverIntent.TURN_RIGHT) ? "[R]"
-                        : (v.intent == ManeuverIntent.TURN_LEFT ? "[L]" : "[S]");
-                String destTag = "->C" + (v.destinationIntersectionId + 1);
-                g2.drawString(v.id + labelIntent + destTag, (int) v.x - 18, (int) v.y - 10);
+                // Etiquetas adaptativas
+                boolean isSelected = v.id.equals(selectedVehicleId);
+                if (isSelected) {
+                    g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
+                    String labelIntent = (v.intent == ManeuverIntent.TURN_RIGHT) ? "[R]"
+                            : (v.intent == ManeuverIntent.TURN_LEFT ? "[L]" : "[S]");
+                    String destTag = " -> C" + (v.destinationIntersectionId + 1);
+                    String speedTag = " (" + String.format(Locale.ROOT, "%.1f", v.currentSpeed * 10.0) + " km/h)";
+                    String fullTag = v.id + " " + labelIntent + destTag + speedTag;
+                    int tagW = g2.getFontMetrics().stringWidth(fullTag);
+                    int tagX = (int) Math.round(v.x) - tagW / 2;
+                    int tagY = (int) Math.round(v.y) - 16;
+
+                    g2.setColor(new Color(20, 26, 38, 225));
+                    g2.fillRoundRect(tagX - 5, tagY - 11, tagW + 10, 15, 6, 6);
+                    g2.setColor(new Color(255, 215, 70));
+                    g2.setStroke(new BasicStroke(1.2f));
+                    g2.drawRoundRect(tagX - 5, tagY - 11, tagW + 10, 15, 6, 6);
+                    g2.drawString(fullTag, tagX, tagY);
+                } else if (v.isEmergency) {
+                    g2.setColor(new Color(210, 30, 50));
+                    g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+                    String prefix = v.category.equals("FIRE_TRUCK") ? "[BOM] " : (v.category.equals("POLICE") ? "[POL] " : "[AMB] ");
+                    g2.drawString(prefix + v.id, (int) Math.round(v.x) - 18, (int) Math.round(v.y) - 10);
+                } else {
+                    // Micro-badge limpo para veículos normais não selecionados
+                    g2.setFont(new Font("Segoe UI", Font.BOLD, 8));
+                    g2.setColor(new Color(50, 60, 75, 200));
+                    String shortTag = "#" + v.id.replaceAll("\\D+", "");
+                    if (shortTag.equals("#")) shortTag = v.id;
+                    g2.drawString(shortTag, (int) Math.round(v.x) - 8, (int) Math.round(v.y) - 9);
+                }
             }
         }
 

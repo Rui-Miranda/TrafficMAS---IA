@@ -289,6 +289,21 @@ public class Main {
                     boolean saved = gui.exportGuiScreenshot(path);
                     System.out.println("[Main][t=" + s + "s] Captura PNG guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
                 }
+                if (s == 6 && seconds >= 10) {
+                    java.util.List<CitySimulationGUI.VisualVehicle> list = gui.getVisualVehiclesSnapshot();
+                    if (!list.isEmpty()) {
+                        CitySimulationGUI.VisualVehicle target = list.get(0);
+                        gui.selectVehicle(target.id);
+                        int newDest = (target.destinationIntersectionId == 8) ? 6 : 8;
+                        gui.performInteractiveDestinationChange(target.id, newDest);
+                        System.out.println("[Main][t=" + s + "s][Fase 6.2-C] Veículo " + target.id + " selecionado por operador -> Destino alterado para C" + (newDest + 1) + " via A*.");
+                        if (screenshotDir != null) {
+                            String path = screenshotDir + "/gui_fase62c_veiculo_selecionado_a_star.png";
+                            boolean saved = gui.exportGuiScreenshot(path);
+                            System.out.println("[Main][t=" + s + "s] Captura PNG Fase 6.2-C (Veículo Selecionado + Rota A*): " + (saved ? "SUCESSO" : "FALHA"));
+                        }
+                    }
+                }
                 if (s == 10 && seconds == 15 && screenshotDir != null) {
                     String path = screenshotDir + "/gui_demo15s_3x3.png";
                     boolean saved = gui.exportGuiScreenshot(path);
