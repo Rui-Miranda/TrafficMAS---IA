@@ -606,18 +606,29 @@ public class Phase62CValidationTestSuite {
         FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
         VehicleControlGateway gw = VehicleControlGateway.getInstance();
 
-        // Aguarda eventuais desregistos assíncronos finalizarem
+        // Aguarda que o agente recentemente adicionado no T20 conclua o seu setup() e registo no gateway
         awaitAgentCount(73, 2000);
-
-        boolean allMatched = true;
-        List<VisualVehicle> visualList = gui.getVisualVehiclesSnapshot();
-
-        for (VisualVehicle v : visualList) {
-            if (!v.isEmergency) {
-                if (!fleet.getActiveNormalVehicleIds().contains(v.id) || !gw.isAgentRegistered(v.id)) {
-                    allMatched = false;
+        long deadline = System.currentTimeMillis() + 2000L;
+        boolean allMatched = false;
+        while (System.currentTimeMillis() < deadline) {
+            allMatched = true;
+            List<VisualVehicle> visualList = gui.getVisualVehiclesSnapshot();
+            if (visualList.isEmpty()) {
+                allMatched = false;
+            } else {
+                for (VisualVehicle v : visualList) {
+                    if (!v.isEmergency) {
+                        if (!fleet.getActiveNormalVehicleIds().contains(v.id) || !gw.isAgentRegistered(v.id)) {
+                            allMatched = false;
+                            break;
+                        }
+                    }
                 }
             }
+            if (allMatched && fleet.getActiveNormalVehicleCount() == 50) {
+                break;
+            }
+            try { Thread.sleep(50); } catch (InterruptedException ignored) {}
         }
 
         check("T22: Correspondência estrita 1:1 entre veículos visuais e agentes JADE",
