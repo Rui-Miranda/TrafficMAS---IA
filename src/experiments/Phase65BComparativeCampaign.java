@@ -182,6 +182,12 @@ public class Phase65BComparativeCampaign {
 
     private static ExperimentRunRecord executeRun(String runId, ControlMode mode, String scenario,
                                                  long seed, TrafficModelBundle3x3 mlBundle) {
+        return executeRun(runId, mode, scenario, seed, mlBundle, false, false);
+    }
+
+    private static ExperimentRunRecord executeRun(String runId, ControlMode mode, String scenario,
+                                                 long seed, TrafficModelBundle3x3 mlBundle,
+                                                 boolean zeroOffsets, boolean mlAlertsOnly) {
         NetworkTopologyConfig topo = NetworkTopologyConfig.CONFIG_3X3;
         NetworkTopologyConfig.setActive(topo);
         SimulationClock.reset();
@@ -249,11 +255,15 @@ public class Phase65BComparativeCampaign {
                     long refTime = currentSimMillis;
                     long d0 = (long) targetCorridor.getSegmentDistancePx(0, topo);
                     long d1 = (long) targetCorridor.getSegmentDistancePx(1, topo);
-                    long off0 = 0L;
-                    long off1 = CorridorDefinition.calculateTravelTimeOffsetMs(d0, progSpeed);
-                    long off2 = off1 + CorridorDefinition.calculateTravelTimeOffsetMs(d1, progSpeed);
-
-                    long[] offsets = {off0, off1, off2};
+                    long[] offsets;
+                    if (zeroOffsets) {
+                        offsets = new long[]{0L, 0L, 0L};
+                    } else {
+                        long off0 = 0L;
+                        long off1 = CorridorDefinition.calculateTravelTimeOffsetMs(d0, progSpeed);
+                        long off2 = off1 + CorridorDefinition.calculateTravelTimeOffsetMs(d1, progSpeed);
+                        offsets = new long[]{off0, off1, off2};
+                    }
                     for (int k = 0; k < 3; k++) {
                         int nodeIdx = nodes.get(k);
                         IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(nodeIdx);
@@ -290,15 +300,17 @@ public class Phase65BComparativeCampaign {
                                 int qEW = sim.getWaitingCount(i, 1);
                                 int targetAxis = (qEW > qNS) ? 1 : 0;
 
-                                IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
-                                String cmdId = "CMD_ML_PRED_C" + (i + 1) + "_" + currentSimMillis;
-                                CoordinationPolicy mlPolicy = new CoordinationPolicy(
-                                        cmdId, "ML_PREDICTIVE_GREEN", targetAxis, 6500L, 0L,
-                                        currentSimMillis, "CORRIDOR_ADAPTIVE", currentSimMillis + 20000L);
+                                if (!mlAlertsOnly) {
+                                    IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
+                                    String cmdId = "CMD_ML_PRED_C" + (i + 1) + "_" + currentSimMillis;
+                                    CoordinationPolicy mlPolicy = new CoordinationPolicy(
+                                            cmdId, "ML_PREDICTIVE_GREEN", targetAxis, 6500L, 0L,
+                                            currentSimMillis, "CORRIDOR_ADAPTIVE", currentSimMillis + 20000L);
 
-                                String res = auth.evaluateAndRegisterCoordinationPolicy(mlPolicy);
-                                if ("ACCEPTED".equals(res)) {
-                                    mlAlertsApplied++;
+                                    String res = auth.evaluateAndRegisterCoordinationPolicy(mlPolicy);
+                                    if ("ACCEPTED".equals(res)) {
+                                        mlAlertsApplied++;
+                                    }
                                 }
 
                                 // Agendar verificação da utilidade do alerta a t + 60s
@@ -481,12 +493,19 @@ public class Phase65BComparativeCampaign {
                 for (String sc : scenarios) {
                     for (long seed : ablationSeeds) {
                         runs++;
-                        ControlMode m;
-                        if ("BASE_NO_COORD".equals(config)) m = ControlMode.LOCAL_ADAPTIVE;
-                        else if ("COORD_ML_FULL_ACTION".equals(config)) m = ControlMode.MULTIAGENT_ML;
-                        else m = ControlMode.MULTIAGENT_COORDINATED;
+                        boolean zeroOffsets = "COORD_OFFSET_ZERO".equals(config);
+                        boolean mlAlertsOnly = "COORD_ML_ALERT_ONLY".equals(config);
 
-                        ExperimentRunRecord r = executeRun("ABL_" + config + "_" + sc + "_S" + seed, m, sc, seed, mlBundle);
+                        ControlMode m;
+                        if ("BASE_NO_COORD".equals(config)) {
+                            m = ControlMode.LOCAL_ADAPTIVE;
+                        } else if ("COORD_ML_FULL_ACTION".equals(config) || "COORD_ML_ALERT_ONLY".equals(config)) {
+                            m = ControlMode.MULTIAGENT_ML;
+                        } else {
+                            m = ControlMode.MULTIAGENT_COORDINATED;
+                        }
+
+                        ExperimentRunRecord r = executeRun("ABL_" + config + "_" + sc + "_S" + seed, m, sc, seed, mlBundle, zeroOffsets, mlAlertsOnly);
                         tpSum += r.throughputPerHour;
                         waitSum += r.avgWaitingTimeSec;
                         qSum += r.meanQueue;

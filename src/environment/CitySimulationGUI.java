@@ -2396,7 +2396,7 @@ public class CitySimulationGUI {
                 g2.dispose();
             };
 
-            if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+            if (!SwingUtilities.isEventDispatchThread()) {
                 SwingUtilities.invokeAndWait(renderTask);
             } else {
                 renderTask.run();

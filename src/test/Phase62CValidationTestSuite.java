@@ -638,18 +638,23 @@ public class Phase62CValidationTestSuite {
 
     private static void test23_EDTNonBlockingResponsiveness() {
         CitySimulationGUI gui = CitySimulationGUI.getInstance();
-        long start = System.nanoTime();
-
-        gui.triggerAddNormalVehicleAsync();
-        gui.triggerManualPhaseAsync(0, 0);
-        gui.triggerReturnToAutoAsync(0);
-
-        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
-        boolean ok = (elapsedMs < 50);
+        final long[] elapsedMs = new long[1];
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                long start = System.nanoTime();
+                gui.triggerAddNormalVehicleAsync();
+                gui.triggerManualPhaseAsync(0, 0);
+                gui.triggerReturnToAutoAsync(0);
+                elapsedMs[0] = (System.nanoTime() - start) / 1_000_000;
+            });
+        } catch (Exception e) {
+            elapsedMs[0] = 9999;
+        }
+        boolean ok = (elapsedMs[0] < 50);
 
         check("T23: Responsividade da GUI: ações assíncronas na EDT executam em < 50ms",
                 ok,
-                "tempoDecorrido=" + elapsedMs + " ms (limite: 50 ms)");
+                "tempoDecorrido=" + elapsedMs[0] + " ms (limite: 50 ms)");
     }
 
     private static void test24_CompatibilityWith2x2Topology() {

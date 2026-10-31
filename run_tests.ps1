@@ -7,7 +7,7 @@ if (-not (Test-Path "bin")) {
     New-Item -ItemType Directory -Path "bin" | Out-Null
 }
 
-Write-Host "[1/20] A compilar fontes e testes..." -ForegroundColor Yellow
+Write-Host "[1/21] A compilar fontes e testes..." -ForegroundColor Yellow
 javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 if ($LASTEXITCODE -ne 0) {
@@ -180,7 +180,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[20/20] A executar suite de validacao da Fase 6.5-B (Machine Learning 3x3, Inteligencia Preditiva JADE e Validacao A/B/C/D)..." -ForegroundColor Green
+Write-Host "[20/21] A executar suite de validacao da Fase 6.5-B (Machine Learning 3x3, Inteligencia Preditiva JADE e Validacao A/B/C/D)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase65BValidationTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -189,6 +189,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
+Write-Host "[21/21] A executar suite de validacao da Fase 7 (Ablacao Corrigida, Integracao 3x3, 73 Agentes e Robustez)..." -ForegroundColor Green
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase7AblationAndIntegrationTestSuite
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERRO] Testes da Fase 7 falharam!" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+Write-Host ""
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "   TODAS AS 19 SUITES DE TESTES (303 TESTES - FASES 1 A 6.5-B) FORAM CONCLUIDAS!" -ForegroundColor Green
+Write-Host "   TODAS AS 20 SUITES DE TESTES (313 TESTES - FASES 1 A 7) FORAM CONCLUIDAS!" -ForegroundColor Green
 Write-Host "================================================================================" -ForegroundColor Cyan

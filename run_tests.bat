@@ -6,7 +6,7 @@ echo ===========================================================================
 
 if not exist bin mkdir bin
 
-echo [1/19] A compilar fontes e testes...
+echo [1/21] A compilar fontes e testes...
 javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 if %ERRORLEVEL% NEQ 0 (
@@ -195,7 +195,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [20/20] A executar suite de validação da Fase 6.5-B (Machine Learning 3x3, Inteligência Preditiva JADE e Validação A/B/C/D)...
+echo [20/21] A executar suite de validação da Fase 6.5-B (Machine Learning 3x3, Inteligência Preditiva JADE e Validação A/B/C/D)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase65BValidationTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -205,7 +205,17 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo [21/21] A executar suite de validação da Fase 7 (Ablação Corrigida, Integração 3x3, 73 Agentes e Robustez)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase7AblationAndIntegrationTestSuite
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Testes da Fase 7 falharam!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
 echo ================================================================================
-echo    TODAS AS 19 SUITES DE TESTES (303 TESTES - FASES 1 A 6.5-B) FORAM CONCLUÍDAS!
+echo    TODAS AS 20 SUITES DE TESTES (313 TESTES - FASES 1 A 7) FORAM CONCLUÍDAS!
 echo ================================================================================
 pause
