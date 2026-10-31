@@ -606,6 +606,9 @@ public class Phase62CValidationTestSuite {
         FleetLifecycleManager fleet = FleetLifecycleManager.getInstance();
         VehicleControlGateway gw = VehicleControlGateway.getInstance();
 
+        // Aguarda eventuais desregistos assíncronos finalizarem
+        awaitAgentCount(73, 2000);
+
         boolean allMatched = true;
         List<VisualVehicle> visualList = gui.getVisualVehiclesSnapshot();
 
