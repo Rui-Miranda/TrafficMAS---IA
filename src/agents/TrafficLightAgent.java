@@ -184,6 +184,10 @@ public class TrafficLightAgent extends Agent {
                         + ";axis=" + policy.targetAxis 
                         + ";duration=" + policy.plannedDurationMs 
                         + ";policyType=" + policy.policyType 
+                        + ";corridorId=" + policy.getCorridorId()
+                        + ";schedStart=" + policy.getScheduledStartMillis()
+                        + ";appliedTime=" + policy.getAppliedTimeMillis()
+                        + ";temporalDeviation=" + policy.getTemporalDeviationMs()
                         + ";timestamp=" + System.currentTimeMillis());
 
                 send(appliedMsg);
@@ -361,10 +365,12 @@ public class TrafficLightAgent extends Agent {
                 int targetAxis = Integer.parseInt(params.getOrDefault("targetAxis", String.valueOf(axis)));
                 long plannedDuration = Long.parseLong(params.getOrDefault("plannedDuration", "5000"));
                 long offsetMs = Long.parseLong(params.getOrDefault("offsetMs", "0"));
+                long refTime = Long.parseLong(params.getOrDefault("refTime", String.valueOf(environment.SimulationClock.currentTimeMillis())));
+                String corridorId = params.getOrDefault("corridorId", "CORRIDOR_GENERAL");
                 long validUntil = Long.parseLong(params.getOrDefault("validUntil", String.valueOf(System.currentTimeMillis() + 10000)));
 
                 IntersectionSafetyAuthority.CoordinationPolicy policy =
-                        new IntersectionSafetyAuthority.CoordinationPolicy(cmdId, policyType, targetAxis, plannedDuration, offsetMs, validUntil);
+                        new IntersectionSafetyAuthority.CoordinationPolicy(cmdId, policyType, targetAxis, plannedDuration, offsetMs, refTime, corridorId, validUntil);
 
                 String evalResult = authority.evaluateAndRegisterCoordinationPolicy(policy);
 
@@ -373,7 +379,7 @@ public class TrafficLightAgent extends Agent {
                     agree.setPerformative(ACLMessage.AGREE);
                     agree.setOntology("coordination-policy");
                     agree.setConversationId("coord-agree-" + cmdId);
-                    agree.setContent("AGREE;cmdId=" + cmdId + ";intersection=" + intersectionIndex + ";status=ACCEPTED");
+                    agree.setContent("AGREE;cmdId=" + cmdId + ";intersection=" + intersectionIndex + ";status=SCHEDULED;schedStart=" + policy.getScheduledStartMillis());
                     send(agree);
                     TrafficMetricsCollector.getInstance().recordFipaMessage();
                 } else {

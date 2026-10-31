@@ -62,20 +62,34 @@ public class CentralCoordinationAgent extends Agent {
         public final int targetAxis;
         public final long plannedDurationMs;
         public final long offsetMs;
+        public final long referenceTimeMillis;
+        public final long scheduledStartMillis;
+        public final String corridorId;
         public final long issuedTimestamp;
         public String status;
         public String refusalReason = null;
         public long appliedTimestamp = 0;
+        public long temporalDeviationMs = 0;
         public boolean wasApplied = false;
 
         public CoordinatedCommandRecord(String cmdId, String policyType, int intersectionIndex, 
                                       int targetAxis, long plannedDurationMs, long offsetMs) {
+            this(cmdId, policyType, intersectionIndex, targetAxis, plannedDurationMs, offsetMs,
+                 environment.SimulationClock.currentTimeMillis(), "CORRIDOR_GENERAL");
+        }
+
+        public CoordinatedCommandRecord(String cmdId, String policyType, int intersectionIndex, 
+                                      int targetAxis, long plannedDurationMs, long offsetMs,
+                                      long referenceTimeMillis, String corridorId) {
             this.cmdId = cmdId;
             this.policyType = policyType;
             this.intersectionIndex = intersectionIndex;
             this.targetAxis = targetAxis;
             this.plannedDurationMs = plannedDurationMs;
             this.offsetMs = offsetMs;
+            this.referenceTimeMillis = (referenceTimeMillis > 0) ? referenceTimeMillis : environment.SimulationClock.currentTimeMillis();
+            this.scheduledStartMillis = this.referenceTimeMillis + offsetMs;
+            this.corridorId = (corridorId != null) ? corridorId : "CORRIDOR_GENERAL";
             this.issuedTimestamp = environment.SimulationClock.currentTimeMillis();
             this.status = "SENT";
             this.wasApplied = false;
@@ -237,15 +251,62 @@ public class CentralCoordinationAgent extends Agent {
         }
     }
 
+    public synchronized List<String> coordenarOndaVerdeCorredor(environment.CorridorDefinition corridor) {
+        List<String> issuedCmds = new ArrayList<>();
+        if (corridor == null || corridor.getNodeCount() < 2) return issuedCmds;
+
+        NetworkTopologyConfig topo = NetworkTopologyConfig.getActive();
+        double speedMult = 1.0;
+        try {
+            speedMult = environment.WeatherEnvironmentManager.getInstance().getSnapshot().getSafeSpeedFactor();
+        } catch (Throwable ignored) {}
+
+        double progSpeedPxSec = environment.CorridorDefinition.calculateProgressionSpeedPxPerSec(2.0, speedMult);
+        long refTime = environment.SimulationClock.currentTimeMillis();
+        long currentOffsetMs = 0L;
+        long duration = 6500L;
+        long seqBase = commandSeq.incrementAndGet();
+
+        List<Integer> nodes = corridor.getIntersectionIndices();
+        for (int i = 0; i < nodes.size(); i++) {
+            int nodeIdx = nodes.get(i);
+            String cmdId = "CMD_GW_" + corridor.getId() + "_N" + (i + 1) + "_" + seqBase;
+            enviarComandoCoordenação(nodeIdx, corridor.getAxis(), cmdId, "GREEN_WAVE",
+                                     duration, currentOffsetMs, refTime, corridor.getId());
+            issuedCmds.add(cmdId);
+
+            if (i < nodes.size() - 1) {
+                double segDistPx = corridor.getSegmentDistancePx(i, topo);
+                long segTravelTimeMs = environment.CorridorDefinition.calculateTravelTimeOffsetMs(segDistPx, progSpeedPxSec);
+                currentOffsetMs += segTravelTimeMs;
+            }
+        }
+
+        return issuedCmds;
+    }
+
     public synchronized void coordenarOndaVerdeHorizontal(int upstreamIdx, int downstreamIdx, int axis) {
         long seq = commandSeq.incrementAndGet();
         String cmdUp = "CMD_GW_H_UP_" + seq;
         String cmdDown = "CMD_GW_H_DN_" + seq;
         long duration = 6500;
-        long travelTimeOffsetMs = 4500;
+        
+        NetworkTopologyConfig topo = NetworkTopologyConfig.getActive();
+        double x1 = topo.getIntersectionCenterX(upstreamIdx);
+        double y1 = topo.getIntersectionCenterY(upstreamIdx);
+        double x2 = topo.getIntersectionCenterX(downstreamIdx);
+        double y2 = topo.getIntersectionCenterY(downstreamIdx);
+        double distPx = Math.hypot(x2 - x1, y2 - y1);
+        double speedMult = 1.0;
+        try {
+            speedMult = environment.WeatherEnvironmentManager.getInstance().getSnapshot().getSafeSpeedFactor();
+        } catch (Throwable ignored) {}
+        double progSpeed = environment.CorridorDefinition.calculateProgressionSpeedPxPerSec(2.0, speedMult);
+        long travelTimeOffsetMs = environment.CorridorDefinition.calculateTravelTimeOffsetMs(distPx, progSpeed);
+        long refTime = environment.SimulationClock.currentTimeMillis();
 
-        enviarComandoCoordenação(upstreamIdx, axis, cmdUp, "GREEN_WAVE", duration, 0);
-        enviarComandoCoordenação(downstreamIdx, axis, cmdDown, "GREEN_WAVE", duration, travelTimeOffsetMs);
+        enviarComandoCoordenação(upstreamIdx, axis, cmdUp, "GREEN_WAVE", duration, 0, refTime, "CORRIDOR_H");
+        enviarComandoCoordenação(downstreamIdx, axis, cmdDown, "GREEN_WAVE", duration, travelTimeOffsetMs, refTime, "CORRIDOR_H");
     }
 
     public synchronized void coordenarOndaVerdeVertical(int upstreamIdx, int downstreamIdx, int axis) {
@@ -253,10 +314,23 @@ public class CentralCoordinationAgent extends Agent {
         String cmdUp = "CMD_GW_V_UP_" + seq;
         String cmdDown = "CMD_GW_V_DN_" + seq;
         long duration = 6500;
-        long travelTimeOffsetMs = 4500;
+        
+        NetworkTopologyConfig topo = NetworkTopologyConfig.getActive();
+        double x1 = topo.getIntersectionCenterX(upstreamIdx);
+        double y1 = topo.getIntersectionCenterY(upstreamIdx);
+        double x2 = topo.getIntersectionCenterX(downstreamIdx);
+        double y2 = topo.getIntersectionCenterY(downstreamIdx);
+        double distPx = Math.hypot(x2 - x1, y2 - y1);
+        double speedMult = 1.0;
+        try {
+            speedMult = environment.WeatherEnvironmentManager.getInstance().getSnapshot().getSafeSpeedFactor();
+        } catch (Throwable ignored) {}
+        double progSpeed = environment.CorridorDefinition.calculateProgressionSpeedPxPerSec(2.0, speedMult);
+        long travelTimeOffsetMs = environment.CorridorDefinition.calculateTravelTimeOffsetMs(distPx, progSpeed);
+        long refTime = environment.SimulationClock.currentTimeMillis();
 
-        enviarComandoCoordenação(upstreamIdx, axis, cmdUp, "GREEN_WAVE", duration, 0);
-        enviarComandoCoordenação(downstreamIdx, axis, cmdDown, "GREEN_WAVE", duration, travelTimeOffsetMs);
+        enviarComandoCoordenação(upstreamIdx, axis, cmdUp, "GREEN_WAVE", duration, 0, refTime, "CORRIDOR_V");
+        enviarComandoCoordenação(downstreamIdx, axis, cmdDown, "GREEN_WAVE", duration, travelTimeOffsetMs, refTime, "CORRIDOR_V");
     }
 
     public synchronized void emitirPoliticaEquilibrio(int intersectionIdx, int targetAxis, long durationMs) {
@@ -268,8 +342,17 @@ public class CentralCoordinationAgent extends Agent {
     public synchronized void enviarComandoCoordenação(int intersectionIdx, int targetAxis, 
                                                       String cmdId, String policyType, 
                                                       long plannedDurationMs, long offsetMs) {
+        enviarComandoCoordenação(intersectionIdx, targetAxis, cmdId, policyType, plannedDurationMs, offsetMs,
+                                 environment.SimulationClock.currentTimeMillis(), "CORRIDOR_GENERAL");
+    }
+
+    public synchronized void enviarComandoCoordenação(int intersectionIdx, int targetAxis, 
+                                                      String cmdId, String policyType, 
+                                                      long plannedDurationMs, long offsetMs,
+                                                      long referenceTimeMillis, String corridorId) {
         CoordinatedCommandRecord record = new CoordinatedCommandRecord(cmdId, policyType, intersectionIdx, 
-                                                                       targetAxis, plannedDurationMs, offsetMs);
+                                                                       targetAxis, plannedDurationMs, offsetMs,
+                                                                       referenceTimeMillis, corridorId);
         commandRecords.put(cmdId, record);
         commandHistory.add(cmdId);
         TrafficMetricsCollector.getInstance().recordCoordinationIssued(cmdId, intersectionIdx, policyType, plannedDurationMs);
@@ -284,12 +367,14 @@ public class CentralCoordinationAgent extends Agent {
         request.setOntology("coordination-policy");
         request.setConversationId("coord-req-" + cmdId);
 
-        long validUntil = environment.SimulationClock.currentTimeMillis() + 10000;
+        long validUntil = environment.SimulationClock.currentTimeMillis() + 15000;
         request.setContent("POLICY;cmdId=" + cmdId 
                 + ";policyType=" + policyType 
                 + ";targetAxis=" + targetAxis 
                 + ";plannedDuration=" + plannedDurationMs 
                 + ";offsetMs=" + offsetMs 
+                + ";refTime=" + referenceTimeMillis
+                + ";corridorId=" + corridorId
                 + ";validUntil=" + validUntil);
 
         System.out.println("[CentralCoordinationAgent] >>> A enviar REQUEST FIPA a " + targetAgentName 
@@ -366,9 +451,9 @@ public class CentralCoordinationAgent extends Agent {
         if (msg.getPerformative() == ACLMessage.AGREE) {
             if (record != null) {
                 if (!"APPLIED".equals(record.status) && !record.wasApplied) {
-                    record.status = "AGREED";
+                    record.status = "SCHEDULED";
                 }
-                System.out.println("[CentralCoordinationAgent] Confirmação AGREE recebida para " + cmdId 
+                System.out.println("[CentralCoordinationAgent] Confirmação AGREE/SCHEDULED recebida para " + cmdId 
                         + " de " + msg.getSender().getLocalName());
             }
         } else if (msg.getPerformative() == ACLMessage.REFUSE) {
@@ -387,11 +472,19 @@ public class CentralCoordinationAgent extends Agent {
                 record.status = "APPLIED";
                 record.wasApplied = true;
                 record.appliedTimestamp = environment.SimulationClock.currentTimeMillis();
+                try {
+                    record.temporalDeviationMs = Long.parseLong(params.getOrDefault("temporalDeviation", "0"));
+                } catch (Exception ignored) {}
                 lastAdherenceByIntersection.put(record.intersectionIndex, record.appliedTimestamp);
                 System.out.println("[CentralCoordinationAgent] >>> SUCESSO: Diretiva " + cmdId 
-                        + " EFETIVAMENTE APLICADA no Cruzamento C" + (record.intersectionIndex + 1) + "!");
+                        + " EFETIVAMENTE APLICADA no Cruzamento C" + (record.intersectionIndex + 1)
+                        + " (Desvio: " + record.temporalDeviationMs + "ms)!");
             }
         }
+    }
+
+    public Map<String, CoordinatedCommandRecord> getAllCommandRecords() {
+        return new ConcurrentHashMap<>(commandRecords);
     }
 
     private Map<String, String> parseParameters(String content) {

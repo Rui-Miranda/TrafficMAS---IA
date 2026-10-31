@@ -1,12 +1,12 @@
 @echo off
 chcp 65001 > nul
 echo ================================================================================
-echo    TRAFFICMAS — EXECUÇÃO DAS SUITES DE TESTES AUTOMATIZADOS (FASES 1 A 6.1)
+echo    TRAFFICMAS — EXECUÇÃO DAS SUITES DE TESTES AUTOMATIZADOS (FASES 1 A 6.5-A)
 echo ================================================================================
 
 if not exist bin mkdir bin
 
-echo [1/13] A compilar fontes e testes...
+echo [1/19] A compilar fontes e testes...
 javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 if %ERRORLEVEL% NEQ 0 (
@@ -175,7 +175,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [18/18] A executar suite de validação da Fase 6.4 (Meteorologia Dinâmica e Condições da Estrada)...
+echo [18/19] A executar suite de validação da Fase 6.4 (Meteorologia Dinâmica e Condições da Estrada)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase64WeatherValidationTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -185,7 +185,17 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo [19/19] A executar suite de validação da Fase 6.5-A (Coordenação Real de 9 Cruzamentos, Offsets e Ondas Verdes 3x3)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase65ACoordinationTestSuite
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Testes da Fase 6.5-A falharam!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
 echo ================================================================================
-echo    TODAS AS 17 SUITES DE TESTES (245 TESTES - FASES 1 A 6.4) FORAM CONCLUÍDAS!
+echo    TODAS AS 18 SUITES DE TESTES (271 TESTES - FASES 1 A 6.5-A) FORAM CONCLUÍDAS!
 echo ================================================================================
 pause

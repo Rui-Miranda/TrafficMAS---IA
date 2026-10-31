@@ -120,8 +120,19 @@ public class IntersectionSafetyAuthority {
         }
     }
 
+    /** Estados de ciclo de vida de uma Diretiva de Coordenação Semafórica (Fase 6.5-A) */
+    public enum PolicyState {
+        REQUESTED,
+        AGREED,
+        SCHEDULED,
+        APPLIED,
+        EXPIRED,
+        REJECTED,
+        PREEMPTED
+    }
+
     /**
-     * Diretiva de Coordenação Semafórica Global (Fase 3).
+     * Diretiva de Coordenação Semafórica Global (Fase 3 / Fase 6.5-A).
      *
      * Modela comandos macro emitidos pelo CentralCoordinationAgent, tais como:
      * - ONDA_VERDE (Green Wave com desfasamento temporal / offset)
@@ -133,39 +144,129 @@ public class IntersectionSafetyAuthority {
         public final int targetAxis; // 0 = NS, 1 = EW
         public final long plannedDurationMs;
         public final long offsetMs;
+        public final long referenceTimeMillis;
+        public final long scheduledStartMillis; // referenceTimeMillis + offsetMs
+        public final String corridorId;
         public final long validUntilMs;
         public final long issuedTimeMs;
-        private boolean applied = false;
+
+        private volatile PolicyState policyState;
+        private volatile boolean applied = false;
+        private volatile long appliedTimeMillis = 0L;
+        private volatile long temporalDeviationMs = 0L;
+        private volatile String statusReason = "REQUESTED";
 
         public CoordinationPolicy(String cmdId, String policyType, int targetAxis,
                                   long plannedDurationMs, long offsetMs, long validUntilMs) {
+            this(cmdId, policyType, targetAxis, plannedDurationMs, offsetMs,
+                 SimulationClock.currentTimeMillis(), "CORRIDOR_GENERAL", validUntilMs);
+        }
+
+        public CoordinationPolicy(String cmdId, String policyType, int targetAxis,
+                                  long plannedDurationMs, long offsetMs,
+                                  long referenceTimeMillis, String corridorId, long validUntilMs) {
             this.cmdId = cmdId;
             this.policyType = policyType;
             this.targetAxis = targetAxis;
             // Limites de segurança rigorosos: mínimo 2000ms, máximo 10000ms
             this.plannedDurationMs = Math.max(2000, Math.min(10000, plannedDurationMs));
             this.offsetMs = Math.max(0, offsetMs);
+            this.referenceTimeMillis = (referenceTimeMillis > 0) ? referenceTimeMillis : SimulationClock.currentTimeMillis();
+            this.scheduledStartMillis = this.referenceTimeMillis + this.offsetMs;
+            this.corridorId = (corridorId != null) ? corridorId : "CORRIDOR_GENERAL";
             this.validUntilMs = validUntilMs;
             this.issuedTimeMs = SimulationClock.currentTimeMillis();
+            this.policyState = PolicyState.REQUESTED;
+        }
+
+        public PolicyState getPolicyState() {
+            return policyState;
+        }
+
+        public long getReferenceTimeMillis() {
+            return referenceTimeMillis;
+        }
+
+        public long getScheduledStartMillis() {
+            return scheduledStartMillis;
+        }
+
+        public long getAppliedTimeMillis() {
+            return appliedTimeMillis;
+        }
+
+        public long getTemporalDeviationMs() {
+            return temporalDeviationMs;
+        }
+
+        public String getCorridorId() {
+            return corridorId;
+        }
+
+        public String getStatusReason() {
+            return statusReason;
+        }
+
+        public boolean isScheduled() {
+            return policyState == PolicyState.SCHEDULED;
         }
 
         public boolean isExpired() {
-            return SimulationClock.currentTimeMillis() > validUntilMs;
+            return policyState == PolicyState.EXPIRED || SimulationClock.currentTimeMillis() > validUntilMs;
         }
 
         public boolean isApplied() {
-            return applied;
+            return policyState == PolicyState.APPLIED || applied;
         }
 
-        public void setApplied(boolean applied) {
+        public synchronized void setApplied(boolean applied) {
             this.applied = applied;
+            if (applied && this.policyState != PolicyState.APPLIED) {
+                markApplied(SimulationClock.currentTimeMillis(), "SET_APPLIED_MANUAL");
+            }
+        }
+
+        public synchronized void markAgreed(String reason) {
+            this.policyState = PolicyState.AGREED;
+            this.statusReason = reason;
+        }
+
+        public synchronized void markScheduled(String reason) {
+            this.policyState = PolicyState.SCHEDULED;
+            this.statusReason = reason;
+        }
+
+        public synchronized void markApplied(long nowMillis, String reason) {
+            this.policyState = PolicyState.APPLIED;
+            this.applied = true;
+            this.appliedTimeMillis = nowMillis;
+            this.temporalDeviationMs = nowMillis - scheduledStartMillis;
+            this.statusReason = reason;
+        }
+
+        public synchronized void markRejected(String reason) {
+            this.policyState = PolicyState.REJECTED;
+            this.statusReason = reason;
+        }
+
+        public synchronized void markPreempted(String reason) {
+            this.policyState = PolicyState.PREEMPTED;
+            this.statusReason = reason;
+        }
+
+        public synchronized void markExpired(String reason) {
+            this.policyState = PolicyState.EXPIRED;
+            this.statusReason = reason;
         }
 
         @Override
         public String toString() {
             return "CoordinationPolicy[id=" + cmdId + ", type=" + policyType 
                     + ", axis=" + (targetAxis == 0 ? "NS" : "EW") 
-                    + ", duration=" + plannedDurationMs + "ms, offset=" + offsetMs + "ms]";
+                    + ", state=" + policyState
+                    + ", duration=" + plannedDurationMs + "ms, offset=" + offsetMs + "ms"
+                    + ", schedStart=" + scheduledStartMillis + ", appTime=" + appliedTimeMillis
+                    + ", dev=" + temporalDeviationMs + "ms]";
         }
     }
 
@@ -352,8 +453,9 @@ public class IntersectionSafetyAuthority {
     private ControlMode controlMode = ControlMode.MULTIAGENT_COORDINATED;
     private long fixedGreenDuration = 4000L;
 
-    // Políticas de Coordenação Global (Fase 3)
+    // Políticas de Coordenação Global (Fase 3 / Fase 6.5-A)
     private CoordinationPolicy activePolicy = null;
+    private CoordinationPolicy lastAppliedPolicy = null;
     private final java.util.Set<String> processedCmdIds = new java.util.HashSet<>();
 
     // Controlo Manual Seguro por Cruzamento (Fase 6.2)
@@ -482,6 +584,10 @@ public class IntersectionSafetyAuthority {
 
     public synchronized CoordinationPolicy getActivePolicy() {
         return activePolicy;
+    }
+
+    public synchronized CoordinationPolicy getLastAppliedPolicy() {
+        return lastAppliedPolicy;
     }
 
     public synchronized ControlMode getControlMode() {
@@ -722,36 +828,62 @@ public class IntersectionSafetyAuthority {
      */
     public synchronized String evaluateAndRegisterCoordinationPolicy(CoordinationPolicy policy) {
         if (policy == null) return "INVALID_PAYLOAD";
-        if (controlMode == ControlMode.FIXED_TIME) return "REJECTED_FIXED_TIME_MODE";
-        if (controlMode == ControlMode.LOCAL_ADAPTIVE) return "REJECTED_LOCAL_ADAPTIVE_MODE";
-        if (policy.isExpired()) return "EXPIRED";
-        if (policy.targetAxis != 0 && policy.targetAxis != 1) return "INVALID_AXIS";
+        if (controlMode == ControlMode.FIXED_TIME) {
+            policy.markRejected("REJECTED_FIXED_TIME_MODE");
+            return "REJECTED_FIXED_TIME_MODE";
+        }
+        if (controlMode == ControlMode.LOCAL_ADAPTIVE) {
+            policy.markRejected("REJECTED_LOCAL_ADAPTIVE_MODE");
+            return "REJECTED_LOCAL_ADAPTIVE_MODE";
+        }
+        if (policy.isExpired()) {
+            policy.markExpired("EXPIRED");
+            return "EXPIRED";
+        }
+        if (policy.targetAxis != 0 && policy.targetAxis != 1) {
+            policy.markRejected("INVALID_AXIS");
+            return "INVALID_AXIS";
+        }
 
         // Idempotência
         if (processedCmdIds.contains(policy.cmdId)) {
+            policy.markRejected("DUPLICATE_COMMAND");
             return "DUPLICATE_COMMAND";
         }
 
         // Precedência de emergência ativa em eixo conflitual
-        if (currentlyServingEmergency != null && currentlyServingEmergency.axis != policy.targetAxis) {
+        if ((currentlyServingEmergency != null && currentlyServingEmergency.axis != policy.targetAxis)
+                || (!emergencyQueue.isEmpty() && emergencyQueue.peek().axis != policy.targetAxis)) {
+            policy.markRejected("REJECTED_EMERGENCY_PRIORITY");
             fireCoordinationRejected(policy, "REJECTED_EMERGENCY_PRIORITY");
             return "REJECTED_EMERGENCY_PRIORITY";
         }
 
+        // Precedência de controlo manual ativo em eixo conflitual
+        if (isManualModeActive() && activeManualRequest.targetAxis != policy.targetAxis) {
+            policy.markRejected("REJECTED_MANUAL_CONTROL_ACTIVE");
+            fireCoordinationRejected(policy, "REJECTED_MANUAL_CONTROL_ACTIVE");
+            return "REJECTED_MANUAL_CONTROL_ACTIVE";
+        }
+
         processedCmdIds.add(policy.cmdId);
+        policy.markScheduled("ACCEPTED_AND_SCHEDULED");
         this.activePolicy = policy;
         metrics.TrafficMetricsCollector.getInstance().recordCoordinationAccepted(policy.cmdId, intersectionIndex);
 
         System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                 + "] Diretiva de coordenação " + policy.cmdId + " (" + policy.policyType 
                 + " | Eixo " + (policy.targetAxis == 0 ? "NS" : "EW") 
-                + " | Duração " + policy.plannedDurationMs + "ms) ACEITE com sucesso.");
+                + " | Duração " + policy.plannedDurationMs + "ms | Sched=" + policy.scheduledStartMillis + ") ACEITE e AGENDADA.");
 
-        // Se o eixo pretendido JÁ se encontra na fase verde, aplica imediatamente a extensão
-        if ((policy.targetAxis == 0 && currentPhase == Phase.NS_GREEN) ||
-            (policy.targetAxis == 1 && currentPhase == Phase.EW_GREEN)) {
+        long now = SimulationClock.currentTimeMillis();
+        // Se o eixo pretendido JÁ se encontra na fase verde E já atingiu o instante de agendamento (ou offset == 0)
+        if (((policy.targetAxis == 0 && currentPhase == Phase.NS_GREEN) ||
+             (policy.targetAxis == 1 && currentPhase == Phase.EW_GREEN)) &&
+            now >= policy.scheduledStartMillis) {
             this.currentGreenDuration = policy.plannedDurationMs;
-            policy.setApplied(true);
+            policy.markApplied(now, "APPLIED_IMMEDIATELY_ON_ACTIVE_GREEN");
+            this.lastAppliedPolicy = policy;
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                     + "] Diretiva de coordenação " + policy.cmdId + " aplicada de imediato na fase verde ativa.");
             metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(policy.cmdId, intersectionIndex);
@@ -762,13 +894,14 @@ public class IntersectionSafetyAuthority {
     }
 
     /**
-     * Cancela a política de coordenação ativa (ex: por sobreposição de emergência).
+     * Cancela a política de coordenação ativa (ex: por sobreposição de emergência ou controlo manual).
      */
     public synchronized void cancelCoordinationPolicy(String reason) {
         if (activePolicy != null) {
             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
-                    + "] Diretiva de coordenação " + activePolicy.cmdId + " cancelada. Motivo: " + reason);
+                    + "] Diretiva de coordenação " + activePolicy.cmdId + " cancelada/preemptada. Motivo: " + reason);
             metrics.TrafficMetricsCollector.getInstance().recordCoordinationPreempted(activePolicy.cmdId, intersectionIndex, reason);
+            activePolicy.markPreempted(reason);
             fireCoordinationRejected(activePolicy, reason);
             activePolicy = null;
         }
@@ -1041,6 +1174,52 @@ public class IntersectionSafetyAuthority {
             }
         }
 
+        // 1.5. Agendamento e Antecipação Física de Políticas de Coordenação (Fase 6.5-A)
+        if (activePolicy != null && currentlyServingEmergency == null && activeManualRequest == null) {
+            if (activePolicy.isExpired()) {
+                activePolicy.markExpired("EXPIRED_BEFORE_APPLICATION");
+                fireCoordinationRejected(activePolicy, "EXPIRED");
+                activePolicy = null;
+            } else if (activePolicy.getPolicyState() == PolicyState.SCHEDULED) {
+                long clearanceTimeMs = yellowDuration + allRedDuration;
+                long prepTimeMs = activePolicy.scheduledStartMillis - clearanceTimeMs;
+
+                // Se estamos no eixo oposto em verde e já atingimos o instante de preparação para o verde agendado
+                if (now >= prepTimeMs) {
+                    if (currentPhase == Phase.NS_GREEN && activePolicy.targetAxis == 1) {
+                        if (elapsed >= 2000L) { // Respeita verde mínimo legal
+                            applyPhaseAtomic(Phase.NS_YELLOW);
+                            targetNextPhase = Phase.EW_GREEN;
+                            return;
+                        }
+                    } else if (currentPhase == Phase.EW_GREEN && activePolicy.targetAxis == 0) {
+                        if (elapsed >= 2000L) { // Respeita verde mínimo legal
+                            applyPhaseAtomic(Phase.EW_YELLOW);
+                            targetNextPhase = Phase.NS_GREEN;
+                            return;
+                        }
+                    }
+                }
+
+                // Se já estamos no eixo verde pretendido e atingimos o instante agendado
+                if (now >= activePolicy.scheduledStartMillis) {
+                    if (activePolicy.targetAxis == 0 && currentPhase == Phase.NS_GREEN) {
+                        activePolicy.markApplied(now, "APPLIED_ON_TARGET_GREEN");
+                        this.currentGreenDuration = activePolicy.plannedDurationMs;
+                        this.lastAppliedPolicy = activePolicy;
+                        metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(activePolicy.cmdId, intersectionIndex);
+                        fireCoordinationApplied(activePolicy);
+                    } else if (activePolicy.targetAxis == 1 && currentPhase == Phase.EW_GREEN) {
+                        activePolicy.markApplied(now, "APPLIED_ON_TARGET_GREEN");
+                        this.currentGreenDuration = activePolicy.plannedDurationMs;
+                        this.lastAppliedPolicy = activePolicy;
+                        metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(activePolicy.cmdId, intersectionIndex);
+                        fireCoordinationApplied(activePolicy);
+                    }
+                }
+            }
+        }
+
         // 2. Máquina de Estados Segura
         switch (currentPhase) {
             case NS_GREEN:
@@ -1065,7 +1244,7 @@ public class IntersectionSafetyAuthority {
                         if (now >= manualHoldUntilMs) {
                             activeManualRequest.markExpired(now, "EXPIRED_MAX_HOLD_AUTO_RETURN");
                             System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1)
-                                    + "] Controlo manual " + activeManualRequest.requestId
+                                     + "] Controlo manual " + activeManualRequest.requestId
                                     + " expirou. A regressar ao MODO AUTOMÁTICO.");
                             fireManualControlStateChanged(activeManualRequest);
                             this.activeManualRequest = null;
@@ -1077,6 +1256,9 @@ public class IntersectionSafetyAuthority {
                         }
                     }
                 } else if (currentlyServingEmergency == null && elapsed >= currentGreenDuration) {
+                    if (activePolicy != null && activePolicy.isApplied()) {
+                        this.activePolicy = null; // Liberta a diretiva concluída prevenindo inanição transversal
+                    }
                     // Ciclo adaptativo normal: fim do verde NS
                     applyPhaseAtomic(Phase.NS_YELLOW);
                     targetNextPhase = Phase.EW_GREEN;
@@ -1121,8 +1303,14 @@ public class IntersectionSafetyAuthority {
                                 + "): Fase " + nextManual + " efetivada após transição segura YELLOW -> ALL_RED.");
                         fireManualControlStateChanged(activeManualRequest);
                     } else {
-                        // Ciclo adaptativo normal ou coordenado (Fase 3 / Fase 5)
-                        Phase next = (targetNextPhase != null) ? targetNextPhase : Phase.EW_GREEN;
+                        // Ciclo adaptativo normal ou coordenado (Fase 3 / Fase 5 / Fase 6.5-A)
+                        Phase next = targetNextPhase;
+                        if (next == null && activePolicy != null && activePolicy.getPolicyState() == PolicyState.SCHEDULED) {
+                            next = (activePolicy.targetAxis == 0) ? Phase.NS_GREEN : Phase.EW_GREEN;
+                        }
+                        if (next == null) {
+                            next = Phase.EW_GREEN;
+                        }
                         targetNextPhase = null;
 
                         if (next == Phase.EW_GREEN) {
@@ -1130,13 +1318,14 @@ public class IntersectionSafetyAuthority {
                                 this.currentGreenDuration = fixedGreenDuration;
                             } else if (activePolicy != null && !activePolicy.isExpired() && activePolicy.targetAxis == 1) {
                                 this.currentGreenDuration = activePolicy.plannedDurationMs;
-                                activePolicy.setApplied(true);
+                                activePolicy.markApplied(now, "APPLIED_AFTER_SAFE_YELLOW_AND_ALL_RED");
+                                this.lastAppliedPolicy = activePolicy;
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                                         + "] Diretiva de coordenação " + activePolicy.cmdId 
-                                        + " aplicada com sucesso ao abrir fase EW_GREEN (" + currentGreenDuration + "ms).");
+                                        + " aplicada com sucesso ao abrir fase EW_GREEN (" + currentGreenDuration + "ms, dev="
+                                        + activePolicy.getTemporalDeviationMs() + "ms).");
                                 metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(activePolicy.cmdId, intersectionIndex);
                                 fireCoordinationApplied(activePolicy);
-                                activePolicy = null;
                             } else {
                                 this.currentGreenDuration = calcularTempoVerdeAdaptativo(waitingVehiclesEW);
                             }
@@ -1146,13 +1335,14 @@ public class IntersectionSafetyAuthority {
                                 this.currentGreenDuration = fixedGreenDuration;
                             } else if (activePolicy != null && !activePolicy.isExpired() && activePolicy.targetAxis == 0) {
                                 this.currentGreenDuration = activePolicy.plannedDurationMs;
-                                activePolicy.setApplied(true);
+                                activePolicy.markApplied(now, "APPLIED_AFTER_SAFE_YELLOW_AND_ALL_RED");
+                                this.lastAppliedPolicy = activePolicy;
                                 System.out.println("[IntersectionSafetyAuthority C" + (intersectionIndex + 1) 
                                         + "] Diretiva de coordenação " + activePolicy.cmdId 
-                                        + " aplicada com sucesso ao abrir fase NS_GREEN (" + currentGreenDuration + "ms).");
+                                        + " aplicada com sucesso ao abrir fase NS_GREEN (" + currentGreenDuration + "ms, dev="
+                                        + activePolicy.getTemporalDeviationMs() + "ms).");
                                 metrics.TrafficMetricsCollector.getInstance().recordCoordinationApplied(activePolicy.cmdId, intersectionIndex);
                                 fireCoordinationApplied(activePolicy);
-                                activePolicy = null;
                             } else {
                                 this.currentGreenDuration = calcularTempoVerdeAdaptativo(waitingVehiclesNS);
                             }
@@ -1196,6 +1386,9 @@ public class IntersectionSafetyAuthority {
                         }
                     }
                 } else if (currentlyServingEmergency == null && elapsed >= currentGreenDuration) {
+                    if (activePolicy != null && activePolicy.isApplied()) {
+                        this.activePolicy = null; // Liberta a diretiva concluída prevenindo inanição transversal
+                    }
                     // Ciclo adaptativo normal: fim do verde EW
                     applyPhaseAtomic(Phase.EW_YELLOW);
                     targetNextPhase = Phase.NS_GREEN;
