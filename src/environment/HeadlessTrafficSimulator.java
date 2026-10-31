@@ -432,6 +432,12 @@ public class HeadlessTrafficSimulator implements TrafficEnvironment.EnvironmentD
                     double targetSpeed = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * speedMultiplier));
                     v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.14);
                     if (v.currentSpeed > targetSpeed) v.currentSpeed = targetSpeed;
+                    if (is3x3 && v.currentSpeed < 0.2) {
+                        v.wasStopped = true;
+                        if (v.currentStopStartSeconds < 0) {
+                            v.currentStopStartSeconds = currentSimTime;
+                        }
+                    }
                 }
             } else {
                 if (v.currentStopStartSeconds >= 0) {
