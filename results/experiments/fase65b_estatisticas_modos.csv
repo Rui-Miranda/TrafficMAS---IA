@@ -1,0 +1,5 @@
+Mode,Runs,ThroughputPerHour_Mean,ThroughputPerHour_Std,AvgWaitSec_Mean,AvgWaitSec_Std,MeanQueue_Mean,MeanQueue_Std,MaxQueue_Max,MLAlerts_Total,MLApplied_Total,FipaMsgs_Total,Violations_Total
+FIXED_TIME,40,4072.00,1663.76,1.66,0.29,0.13,0.06,6,0,0,0,0
+MULTIAGENT_COORDINATED,40,4054.17,1656.00,3.35,0.22,0.22,0.10,7,0,0,8640,0
+MULTIAGENT_ML,40,4055.17,1657.88,3.34,0.22,0.22,0.09,7,1075,1075,11865,0
+LOCAL_ADAPTIVE,40,4050.50,1657.14,3.73,0.37,0.25,0.11,8,0,0,0,0

@@ -558,6 +558,10 @@ public class IntersectionSafetyAuthority {
         return currentPhase;
     }
 
+    public synchronized long getPhaseElapsedMs() {
+        return SimulationClock.currentTimeMillis() - phaseStartMillis;
+    }
+
     public synchronized LightState getLightState(int axis) {
         return (axis == 0) ? currentPhase.nsState : currentPhase.ewState;
     }
@@ -835,6 +839,14 @@ public class IntersectionSafetyAuthority {
         if (controlMode == ControlMode.LOCAL_ADAPTIVE) {
             policy.markRejected("REJECTED_LOCAL_ADAPTIVE_MODE");
             return "REJECTED_LOCAL_ADAPTIVE_MODE";
+        }
+        boolean is3x3 = (NetworkTopologyConfig.getActive() != null 
+                && NetworkTopologyConfig.getActive().getIntersectionCount() == 9);
+        boolean isMlDirective = (policy.policyType != null && policy.policyType.contains("ML"))
+                || (is3x3 && policy.cmdId != null && policy.cmdId.contains("ML"));
+        if (is3x3 && isMlDirective && controlMode == ControlMode.MULTIAGENT_COORDINATED) {
+            policy.markRejected("REJECTED_COORDINATED_NO_ML_MODE");
+            return "REJECTED_COORDINATED_NO_ML_MODE";
         }
         if (policy.isExpired()) {
             policy.markExpired("EXPIRED");

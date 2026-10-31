@@ -1,0 +1,43 @@
+{
+  "modelName": "RegularizedLogisticRegression3x3",
+  "modelVersion": "1.0.0",
+  "topology": "GRID_3X3",
+  "datasetSha256": "72d3ab47953ebc65249539eae65c3aa135e4ff22ae2f88535f002918e6d9dbce",
+  "trainingTimestamp": 1793441871073,
+  "decisionThreshold": 0.12000000000000001,
+  "predictionHorizonSeconds": 60.0,
+  "features": [
+    "queue_NS",
+    "queue_EW",
+    "total_queue",
+    "queue_ratio",
+    "approaching_volume",
+    "average_speed",
+    "average_waiting_time",
+    "current_phase",
+    "green_elapsed_seconds",
+    "weather_condition",
+    "road_friction_mu",
+    "upstream_neighbor_queue_max"
+  ],
+  "bias": -1.9428604127136924,
+  "validationMetrics": {
+    "accuracy": 0.4958,
+    "precision": 0.1702,
+    "recall": 0.6573,
+    "f1": 0.2704,
+    "rocAuc": 0.5899,
+    "prAuc": 0.1711,
+    "brierScore": 0.1209
+  },
+  "testMetrics": {
+    "accuracy": 0.4948,
+    "precision": 0.1593,
+    "recall": 0.6989,
+    "f1": 0.2595,
+    "rocAuc": 0.6181,
+    "prAuc": 0.1615,
+    "brierScore": 0.1087,
+    "avgLatencyMicros": 0.23
+  }
+}

@@ -185,7 +185,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [19/19] A executar suite de validação da Fase 6.5-A (Coordenação Real de 9 Cruzamentos, Offsets e Ondas Verdes 3x3)...
+echo [19/20] A executar suite de validação da Fase 6.5-A (Coordenação Real de 9 Cruzamentos, Offsets e Ondas Verdes 3x3)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase65ACoordinationTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -195,7 +195,17 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo [20/20] A executar suite de validação da Fase 6.5-B (Machine Learning 3x3, Inteligência Preditiva JADE e Validação A/B/C/D)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase65BValidationTestSuite
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Testes da Fase 6.5-B falharam!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
 echo ================================================================================
-echo    TODAS AS 18 SUITES DE TESTES (271 TESTES - FASES 1 A 6.5-A) FORAM CONCLUÍDAS!
+echo    TODAS AS 19 SUITES DE TESTES (303 TESTES - FASES 1 A 6.5-B) FORAM CONCLUÍDAS!
 echo ================================================================================
 pause

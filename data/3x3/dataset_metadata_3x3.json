@@ -1,0 +1,30 @@
+{
+  "datasetName": "TrafficMAS_3x3_Congestion_Dataset",
+  "topology": "GRID_3X3",
+  "intersectionsCount": 9,
+  "predictionHorizonSeconds": 60.0,
+  "sampleIntervalSeconds": 5.0,
+  "totalSamples": 16992,
+  "featuresCount": 12,
+  "features": [
+    "queue_NS",
+    "queue_EW",
+    "total_queue",
+    "queue_ratio",
+    "approaching_volume",
+    "average_speed",
+    "average_waiting_time",
+    "current_phase",
+    "green_elapsed_seconds",
+    "weather_condition",
+    "road_friction_mu",
+    "upstream_neighbor_queue_max"
+  ],
+  "targetDefinition": "future_total_queue >= 3 || future_avg_wait_sec >= 4.0",
+  "splits": {
+    "TRAIN": { "samples": 10620, "positives": 1321, "prevalence": 0.1244 },
+    "VAL":   { "samples": 4248, "positives": 604, "prevalence": 0.1422 },
+    "TEST":  { "samples": 2124, "positives": 269, "prevalence": 0.1266 }
+  },
+  "leakageProtection": "Grouped split by RunId and Seed; no overlapping time windows; test seeds never seen during training; zero future leakage"
+}

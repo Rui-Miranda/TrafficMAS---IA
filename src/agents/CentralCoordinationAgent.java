@@ -584,12 +584,15 @@ public class CentralCoordinationAgent extends Agent {
                     int targetAxis = params.containsKey("targetAxis") 
                             ? Integer.parseInt(params.get("targetAxis")) 
                             : ((tel != null && tel.waitingEW > tel.waitingNS) ? 1 : ((tel != null && tel.currentPhase != null && tel.currentPhase.contains("EW")) ? 1 : 0));
-                    long duration = (probability >= 0.70) ? 6500 : 5000;
+                    boolean is3x3 = (environment.NetworkTopologyConfig.getActive() != null 
+                            && environment.NetworkTopologyConfig.getActive().getIntersectionCount() == 9);
+                    long duration = (is3x3 ? (probability >= 0.25) : (probability >= 0.70)) ? 6500 : 5000;
                     long seq = commandSeq.incrementAndGet();
                     String cmdId = "CMD_ML_ADAPT_" + seq;
+                    String polType = is3x3 ? "ML_PREDICTIVE_GREEN" : "BALANCED";
                     System.out.println("[CentralCoordinationAgent] >>> A despachar Diretiva Adaptativa Preditiva: " + 
-                            cmdId + " (Eixo " + (targetAxis == 0 ? "NS" : "EW") + ", " + duration + "ms) para Cruzamento C" + (intersection + 1));
-                    enviarComandoCoordenação(intersection, targetAxis, cmdId, "BALANCED", duration, 0);
+                            cmdId + " (" + polType + " | Eixo " + (targetAxis == 0 ? "NS" : "EW") + ", " + duration + "ms) para Cruzamento C" + (intersection + 1));
+                    enviarComandoCoordenação(intersection, targetAxis, cmdId, polType, duration, 0);
                     lastAdaptiveCommandId = cmdId;
                 }
             }

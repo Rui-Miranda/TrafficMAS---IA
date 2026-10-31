@@ -25,7 +25,10 @@ import java.util.Locale;
 public class DisruptionManagementAgent extends Agent {
 
     private TrafficModelBundle modelBundle = null;
+    private ml.TrafficModelBundle3x3 modelBundle3x3 = null;
     private boolean mlModelLoaded = false;
+    private boolean mlModel3x3Loaded = false;
+    private String model3x3Path = ml.TrafficModelBundle3x3.DEFAULT_MODEL_PATH;
 
     private static class WeatherScenario {
         String name;
@@ -85,12 +88,15 @@ public class DisruptionManagementAgent extends Agent {
 
         registarNoDF();
         carregarModeloML();
+        carregarModeloML3x3();
 
-        if (mlModelLoaded) {
+        if (mlModel3x3Loaded) {
+            System.out.println("[DisruptionManagementAgent] Agente preditivo online com modelo 3×3 operacional: " + modelBundle3x3);
+        } else if (mlModelLoaded) {
             System.out.println("[DisruptionManagementAgent] Agente preditivo online com modelo ML operacional: " + modelBundle);
         } else {
             System.out.println("[DisruptionManagementAgent] Agente preditivo online em modo FALLBACK (heurística legada). " +
-                    "Modelo ML não disponível em: " + modelPath);
+                    "Modelos ML não disponíveis em: " + modelPath + " / " + model3x3Path);
         }
 
         addBehaviour(new TickerBehaviour(this, INFERENCE_PERIOD_MS) {
@@ -99,13 +105,56 @@ public class DisruptionManagementAgent extends Agent {
                 if (environment.SimulationClock.isSimulatedMode()) {
                     return;
                 }
-                if (mlModelLoaded) {
-                    executarInferenciaMLOperacional();
+                NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
+                if (topo != null && topo.getRows() == 3) {
+                    if (mlModel3x3Loaded) {
+                        executarInferenciaMLOperacional3x3();
+                    } else {
+                        executarInferenciaLegada();
+                    }
                 } else {
-                    executarInferenciaLegada();
+                    if (mlModelLoaded) {
+                        executarInferenciaMLOperacional();
+                    } else {
+                        executarInferenciaLegada();
+                    }
                 }
             }
         });
+    }
+
+    private void carregarModeloML3x3() {
+        File modelFile = new File(model3x3Path);
+        if (!modelFile.exists()) {
+            mlModel3x3Loaded = false;
+            return;
+        }
+
+        try {
+            modelBundle3x3 = ml.TrafficModelBundle3x3.loadFromFile(model3x3Path);
+            mlModel3x3Loaded = true;
+
+            System.out.println("[DisruptionManagementAgent] Modelo 3×3 carregado com sucesso:");
+            System.out.println("  • Nome: " + modelBundle3x3.getModelName());
+            System.out.println("  • Versão: " + modelBundle3x3.getModelVersion());
+            System.out.println("  • Topologia: " + modelBundle3x3.getTopology());
+            System.out.println("  • Threshold: " + modelBundle3x3.getDecisionThreshold());
+            System.out.println("  • Horizonte: " + modelBundle3x3.getPredictionHorizonSeconds() + "s");
+            System.out.println("  • Features (12): " + java.util.Arrays.toString(modelBundle3x3.getFeatureNames()));
+            System.out.println("  • SHA-256 Dataset: " + modelBundle3x3.getDatasetSha256());
+
+            File csvFile = new File("data/3x3/dataset_traffic_3x3.csv");
+            if (csvFile.exists()) {
+                String realSha = ml.TrafficModelBundle3x3.computeFileSha256(csvFile);
+                boolean validHash = modelBundle3x3.isDatasetCompatible(realSha);
+                System.out.println("  • Validação Integridade Dataset CSV 3x3: " + (validHash ? "VÁLIDO (100% íntegro)" : "INCOMPATÍVEL"));
+            }
+
+        } catch (Exception e) {
+            System.err.println("[DisruptionManagementAgent] Erro ao carregar modelo ML 3x3: " + e.getMessage());
+            mlModel3x3Loaded = false;
+            modelBundle3x3 = null;
+        }
     }
 
     private void carregarModeloML() {
@@ -207,6 +256,184 @@ public class DisruptionManagementAgent extends Agent {
                         ((ALERT_COOLDOWN_MS - (now - lastAlertTimestamp)) / 1000) + "s).");
             }
         }
+    }
+
+    public void executarInferenciaMLOperacional3x3() {
+        if (!mlModel3x3Loaded || modelBundle3x3 == null) {
+            TrafficEnvironment.getInstance().setMLPredictionNotice("ML Preditivo 3x3: Modelo Indisponível");
+            return;
+        }
+
+        TrafficEnvironment env = TrafficEnvironment.getInstance();
+        NetworkTopologyConfig topo = env.getTopology();
+        int n = topo.getIntersectionCount();
+
+        double maxProbability = 0.0;
+        int maxProbIntersection = -1;
+        int maxPredClass = 0;
+        int threatenedAxisForMax = 0;
+
+        for (int i = 0; i < n; i++) {
+            double[] features = extrairFeaturesTempoReal3x3(env, i);
+            double probability = modelBundle3x3.predictProbability(features);
+            int predicted = probability >= modelBundle3x3.getDecisionThreshold() ? 1 : 0;
+
+            totalInferenceCount++;
+
+            int qNS = env.getWaitingVehiclesCount(i, 0);
+            int qEW = env.getWaitingVehiclesCount(i, 1);
+            int axis = (qEW > qNS) ? 1 : 0;
+
+            if (probability > maxProbability) {
+                maxProbability = probability;
+                maxProbIntersection = i;
+                maxPredClass = predicted;
+                threatenedAxisForMax = axis;
+            }
+
+            String crossingName = getCrossingName(i);
+            int probPercent = (int) Math.round(probability * 100);
+            String nivel = (probability >= 0.25) ? "CRÍTICO" : ((probability >= modelBundle3x3.getDecisionThreshold()) ? "MODERADO" : "BAIXO");
+
+            System.out.println(String.format(Locale.US,
+                    "[DisruptionManagementAgent - ML 3x3] Cruzamento %s: P(Cong)=%.3f (%d%% %s) | Classe=%d | Eixo=%s",
+                    crossingName, probability, probPercent, nivel, predicted, (axis == 0 ? "NS" : "EW")));
+        }
+
+        lastDisruptionProbability = maxProbability;
+        lastPredictedClass = maxPredClass;
+        lastIntersectionAlerted = maxProbIntersection;
+
+        int probPercent = (int) Math.round(maxProbability * 100);
+        String nivel = (maxProbability >= 0.25) ? "CRÍTICO" : ((maxProbability >= modelBundle3x3.getDecisionThreshold()) ? "MODERADO" : "BAIXO");
+        String hudMsg = String.format(Locale.US, "ML 3x3: %d%% risco (%s) [C%d]",
+                probPercent, nivel, (maxProbIntersection + 1));
+        env.setMLPredictionNotice(hudMsg);
+
+        if (maxPredClass == 1) {
+            long now = environment.SimulationClock.currentTimeMillis();
+            if ((now - lastAlertTimestamp) >= ALERT_COOLDOWN_MS) {
+                emitirDisturbanceAlert3x3(maxProbIntersection, maxProbability, threatenedAxisForMax);
+                lastAlertTimestamp = now;
+                totalAlertsSent++;
+            } else {
+                System.out.println("[DisruptionManagementAgent - ML 3x3] Alerta suprimido por cooldown (restam " +
+                        ((ALERT_COOLDOWN_MS - (now - lastAlertTimestamp)) / 1000) + "s).");
+            }
+        }
+    }
+
+    public double[] extrairFeaturesTempoReal3x3(TrafficEnvironment env, int intersectionIndex) {
+        int queueNS = env.getWaitingVehiclesCount(intersectionIndex, 0);
+        int queueEW = env.getWaitingVehiclesCount(intersectionIndex, 1);
+        int totalQueue = queueNS + queueEW;
+        double queueRatio = (totalQueue > 0)
+                ? ((double) (queueNS - queueEW) / (double) (totalQueue + 1.0))
+                : 0.0;
+
+        int approachingNS = env.getApproachingVehiclesCount(intersectionIndex, 0);
+        int approachingEW = env.getApproachingVehiclesCount(intersectionIndex, 1);
+        int totalApproaching = approachingNS + approachingEW;
+
+        double avgSpeed = env.getAverageSpeed(intersectionIndex);
+        double avgWait = env.getAverageWaitingTime(intersectionIndex);
+
+        environment.IntersectionSafetyAuthority auth = environment.IntersectionSafetyAuthority.getAuthority(intersectionIndex);
+        double currentPhaseCode = 0.5;
+        double greenElapsedSec = 0.0;
+        if (auth != null) {
+            environment.CitySimulationGUI.LightState stateNS = auth.getLightState(0);
+            environment.CitySimulationGUI.LightState stateEW = auth.getLightState(1);
+            if (stateNS == environment.CitySimulationGUI.LightState.GREEN) {
+                currentPhaseCode = 0.0;
+            } else if (stateEW == environment.CitySimulationGUI.LightState.GREEN) {
+                currentPhaseCode = 1.0;
+            } else {
+                currentPhaseCode = 0.5;
+            }
+            greenElapsedSec = auth.getPhaseElapsedMs() / 1000.0;
+        }
+
+        int weatherCode = env.getWeatherCondition();
+        double roadFrictionMu = 1.00;
+        if (weatherCode == 1) {
+            roadFrictionMu = 0.70;
+        } else if (weatherCode == 2) {
+            roadFrictionMu = 0.45;
+        }
+
+        int row = intersectionIndex / 3;
+        int col = intersectionIndex % 3;
+        int maxNeighborQueue = 0;
+        int[] dr = {-1, 1, 0, 0};
+        int[] dc = {0, 0, -1, 1};
+
+        for (int k = 0; k < 4; k++) {
+            int nr = row + dr[k];
+            int nc = col + dc[k];
+            if (nr >= 0 && nr < 3 && nc >= 0 && nc < 3) {
+                int neighborIndex = nr * 3 + nc;
+                int nQ = env.getWaitingVehiclesCount(neighborIndex, 0) + env.getWaitingVehiclesCount(neighborIndex, 1);
+                if (nQ > maxNeighborQueue) {
+                    maxNeighborQueue = nQ;
+                }
+            }
+        }
+
+        return new double[] {
+            queueNS,
+            queueEW,
+            totalQueue,
+            queueRatio,
+            totalApproaching,
+            avgSpeed,
+            avgWait,
+            currentPhaseCode,
+            greenElapsedSec,
+            (double) weatherCode,
+            roadFrictionMu,
+            (double) maxNeighborQueue
+        };
+    }
+
+    private void emitirDisturbanceAlert3x3(int intersectionIndex, double probability, int targetAxis) {
+        ACLMessage msg = new ACLMessage(ACLMessage.INFORM);
+        msg.setOntology("DISTURBANCE_ALERT");
+
+        long now = environment.SimulationClock.currentTimeMillis();
+        msg.setConversationId("ml-alert-3x3-" + now);
+
+        long validUntil = now + (long) (modelBundle3x3.getPredictionHorizonSeconds() * 1000);
+        String alertId = "ALERT_ML_3X3_C" + (intersectionIndex + 1) + "_" + now;
+        String riskType = (probability >= 0.25) ? "CRITICAL_CONGESTION" : "MODERATE_CONGESTION";
+
+        String content = String.format(Locale.US,
+                "alertId=%s;type=ML_PREDICTION;intersection=%d;probability=%.4f;predicted=1;speedMultiplier=1.00;horizon=%.0f;model=%s;threshold=%.2f;timestamp=%d;validUntil=%d;riskType=%s;targetAxis=%d;topology=GRID_3X3",
+                alertId, intersectionIndex, probability,
+                modelBundle3x3.getPredictionHorizonSeconds(),
+                modelBundle3x3.getModelName(),
+                modelBundle3x3.getDecisionThreshold(),
+                now, validUntil, riskType, targetAxis);
+        msg.setContent(content);
+
+        NetworkTopologyConfig topo = NetworkTopologyConfig.getActive();
+        for (int i = 0; i < topo.getIntersectionCount(); i++) {
+            String c = topo.getIntersectionName(i);
+            msg.addReceiver(new jade.core.AID("Semaforo_NS_" + c, jade.core.AID.ISLOCALNAME));
+            msg.addReceiver(new jade.core.AID("Semaforo_EW_" + c, jade.core.AID.ISLOCALNAME));
+        }
+        msg.addReceiver(new jade.core.AID("AgenteCoordenadorCentral", jade.core.AID.ISLOCALNAME));
+
+        send(msg);
+        TrafficMetricsCollector.getInstance().recordFipaMessage();
+
+        System.out.println("\n[DisruptionManagementAgent - ML 3x3] >>> DISTURBANCE_ALERT EMITIDO <<<");
+        System.out.println("  • Alerta ID: " + alertId);
+        System.out.println("  • Cruzamento mais crítico: C" + (intersectionIndex + 1) + " (" + getCrossingName(intersectionIndex) + ")");
+        System.out.println("  • Eixo Ameaçado: " + (targetAxis == 0 ? "Norte-Sul (NS)" : "Este-Oeste (EW)"));
+        System.out.println("  • Probabilidade: " + (int) Math.round(probability * 100) + "% (" + riskType + ")");
+        System.out.println("  • Limiar de Decisão: " + (int) Math.round(modelBundle3x3.getDecisionThreshold() * 100) + "%");
+        System.out.println("  • Horizonte de Previsão: " + (int) modelBundle3x3.getPredictionHorizonSeconds() + "s\n");
     }
 
     public double[] extrairFeaturesTempoReal(TrafficEnvironment env, int intersectionIndex) {
@@ -379,11 +606,33 @@ public class DisruptionManagementAgent extends Agent {
         this.lastAlertTimestamp = timestamp;
     }
 
+    public boolean isMLModel3x3Loaded() {
+        return mlModel3x3Loaded;
+    }
+
+    public ml.TrafficModelBundle3x3 getModelBundle3x3() {
+        return modelBundle3x3;
+    }
+
+    public void setModelBundle3x3(ml.TrafficModelBundle3x3 bundle) {
+        this.modelBundle3x3 = bundle;
+        this.mlModel3x3Loaded = (bundle != null);
+    }
+
     public synchronized void triggerScheduledInference() {
-        if (mlModelLoaded) {
-            executarInferenciaMLOperacional();
+        NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
+        if (topo != null && topo.getRows() == 3) {
+            if (mlModel3x3Loaded && modelBundle3x3 != null) {
+                executarInferenciaMLOperacional3x3();
+            } else {
+                executarInferenciaLegada();
+            }
         } else {
-            executarInferenciaLegada();
+            if (mlModelLoaded && modelBundle != null) {
+                executarInferenciaMLOperacional();
+            } else {
+                executarInferenciaLegada();
+            }
         }
     }
 
