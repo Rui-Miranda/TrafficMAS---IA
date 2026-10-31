@@ -259,7 +259,38 @@ public class TrafficLightAgent extends Agent {
             System.out.println("[TrafficLightAgent " + direction + "] Mensagem de SOCORRO recebida de " 
                     + senderName + ": " + msg.getContent());
 
-            authority.requestEmergency(senderName, axis, senderName);
+            String cat = "AMBULANCE";
+            int urg = 3;
+            String missionId = null;
+            if (msg.getContent() != null) {
+                String c = msg.getContent();
+                if (c.contains("Cat=")) {
+                    try {
+                        int idx = c.indexOf("Cat=") + 4;
+                        int end = c.indexOf(",", idx);
+                        if (end < 0) end = c.indexOf(")", idx);
+                        if (end > idx) cat = c.substring(idx, end).trim();
+                    } catch (Throwable ignored) {}
+                }
+                if (c.contains("Urg=")) {
+                    try {
+                        int idx = c.indexOf("Urg=") + 4;
+                        int end = c.indexOf(")", idx);
+                        if (end < 0) end = c.indexOf(",", idx);
+                        if (end > idx) urg = Integer.parseInt(c.substring(idx, end).trim());
+                    } catch (Throwable ignored) {}
+                }
+                if (c.contains("Mis=")) {
+                    try {
+                        int idx = c.indexOf("Mis=") + 4;
+                        int end = c.indexOf(";", idx);
+                        if (end < 0) end = c.indexOf(")", idx);
+                        if (end > idx) missionId = c.substring(idx, end).trim();
+                    } catch (Throwable ignored) {}
+                }
+            }
+
+            authority.requestEmergency(senderName, axis, senderName, cat, urg, missionId, null);
 
             ACLMessage confirm = msg.createReply();
             confirm.setPerformative(ACLMessage.CONFIRM);

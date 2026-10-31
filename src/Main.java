@@ -1,4 +1,5 @@
 import environment.CitySimulationGUI;
+import environment.EmergencyMission;
 import environment.FleetLifecycleManager;
 import environment.IntersectionSafetyAuthority;
 import environment.NetworkTopologyConfig;
@@ -329,6 +330,30 @@ public class Main {
                     System.out.println("[Main][t=" + s + "s][Frota] 2 adições executadas (" + a1.vehicleId + ", " + a2.vehicleId
                             + ") -> Normais=" + fleet.getActiveNormalVehicleCount() + "/50 | Botão Adicionar="
                             + (gui.isAddVehicleButtonEnabled() ? "ATIVO" : "DESATIVADO"));
+                }
+                if (s == 21 && seconds >= 25) {
+                    // Fase 6.3: Seleção e ativação da missão da viatura prioritária para demonstração de cedência física
+                    CitySimulationGUI.VisualVehicle amb = gui.getVisualVehicle("Ambulancia_INEM_01");
+                    if (amb != null) {
+                        amb.activeMission = true;
+                        amb.urgencyLevel = 4;
+                        if (amb.mission != null) {
+                            amb.mission.setUrgencyLevel(4);
+                            amb.mission.setState(EmergencyMission.MissionState.EN_ROUTE);
+                        }
+                        gui.selectVehicle(amb.id);
+                        gui.refreshEmergencyControlState();
+                        System.out.println("[Main][t=" + s + "s][Fase 6.3] Ambulancia_INEM_01 selecionada com Urgência 4 em missão ativa.");
+                    }
+                }
+                if (s == 24 && seconds >= 25 && screenshotDir != null) {
+                    String path = screenshotDir + "/gui_fase63_cedencia_fisica_emergencia.png";
+                    boolean saved = gui.exportGuiScreenshot(path);
+                    System.out.println("[Main][t=" + s + "s][Fase 6.3] Captura PNG de Cedência Física guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
+                    try {
+                        String brainArtifact = "C:/Users/etien/.gemini/antigravity/brain/8e70ea93-be67-4250-98f3-a72f34a8bd5b/gui_fase63_cedencia_fisica_emergencia.png";
+                        gui.exportGuiScreenshot(brainArtifact);
+                    } catch (Throwable ignored) {}
                 }
                 if (s == 25 && seconds >= 30) {
                     int c5X = gui.getTopology().getIntersectionX(4) + 48;

@@ -3,17 +3,17 @@ package environment;
 import java.io.Serializable;
 
 /**
- * Snapshot Sensorial disponibilizado pelo ambiente físico ao VehicleAgent (Fase 6.2-D).
+ * Snapshot Sensorial disponibilizado pelo ambiente físico ao VehicleAgent (Fase 6.2-D / Fase 6.3).
  *
  * Encapsula de forma imutável todas as perceções locais do veículo no paradigma:
  * PERCEÇÃO -> RACIOCÍNIO -> AÇÃO.
  *
- * Permite ao agente tomar decisões autónomas de aceleração, travagem, paragem,
- * manobra de viragem e replaneamento A*.
+ * Fase 6.3: Estendido com perceções de viaturas prioritárias em aproximação pela retaguarda,
+ * estado da missão, urgência e viabilidade física de cedência de passagem (mudança de faixa segura).
  */
 public class VehiclePerception implements Serializable {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     private final String vehicleId;
     private final double x;
@@ -33,13 +33,36 @@ public class VehiclePerception implements Serializable {
     private final long timestampMillis;
     private final long tick;
 
+    // Campos de Perceção de Emergências (Fase 6.3 — Cedência Física Cooperativa)
+    private final boolean hasApproachingEmergency;
+    private final String emergencyVehicleId;
+    private final String emergencyCategory; // AMBULANCE, FIRE_TRUCK, POLICE
+    private final String emergencyMissionId;
+    private final int emergencyUrgency; // 1 a 5
+    private final double emergencyDistanceBehind; // Distância longitudinal atrás da viatura (px)
+    private final double emergencyRelativeSpeed; // Velocidade relativa de aproximação
+    private final int emergencyLane; // 0: direita, 1: esquerda
+    private final boolean isRightLaneClearForYield; // Se a faixa direita está desimpedida
+    private final boolean isYieldSafe; // Se a manobra de cedência é fisicamente segura
+    private final boolean approachingFromBehind;
+    private final double estimatedTimeToArrivalSeconds;
+
+    /**
+     * Construtor Completo da Fase 6.3 (com perceção de emergências e cedência física).
+     */
     public VehiclePerception(String vehicleId, double x, double y, double currentSpeed, double maxSpeed,
                              int direction, int laneIndex, boolean inIntersection,
                              int approachingIntersection, double distanceToStopLine,
                              CitySimulationGUI.LightState trafficLightState,
                              double distanceToLeadingVehicle, double leadingVehicleSpeed,
                              long graphVersion, double speedMultiplier,
-                             long timestampMillis, long tick) {
+                             long timestampMillis, long tick,
+                             boolean hasApproachingEmergency, String emergencyVehicleId,
+                             String emergencyCategory, String emergencyMissionId,
+                             int emergencyUrgency, double emergencyDistanceBehind,
+                             double emergencyRelativeSpeed, int emergencyLane,
+                             boolean isRightLaneClearForYield, boolean isYieldSafe,
+                             boolean approachingFromBehind, double estimatedTimeToArrivalSeconds) {
         this.vehicleId = vehicleId;
         this.x = x;
         this.y = y;
@@ -57,6 +80,36 @@ public class VehiclePerception implements Serializable {
         this.speedMultiplier = speedMultiplier;
         this.timestampMillis = timestampMillis;
         this.tick = tick;
+
+        this.hasApproachingEmergency = hasApproachingEmergency;
+        this.emergencyVehicleId = emergencyVehicleId;
+        this.emergencyCategory = (emergencyCategory != null) ? emergencyCategory : "AMBULANCE";
+        this.emergencyMissionId = emergencyMissionId;
+        this.emergencyUrgency = emergencyUrgency;
+        this.emergencyDistanceBehind = emergencyDistanceBehind;
+        this.emergencyRelativeSpeed = emergencyRelativeSpeed;
+        this.emergencyLane = emergencyLane;
+        this.isRightLaneClearForYield = isRightLaneClearForYield;
+        this.isYieldSafe = isYieldSafe;
+        this.approachingFromBehind = approachingFromBehind;
+        this.estimatedTimeToArrivalSeconds = estimatedTimeToArrivalSeconds;
+    }
+
+    /**
+     * Construtor Retrocompatível da Fase 6.2-D (sem perceção de emergência em aproximação).
+     */
+    public VehiclePerception(String vehicleId, double x, double y, double currentSpeed, double maxSpeed,
+                             int direction, int laneIndex, boolean inIntersection,
+                             int approachingIntersection, double distanceToStopLine,
+                             CitySimulationGUI.LightState trafficLightState,
+                             double distanceToLeadingVehicle, double leadingVehicleSpeed,
+                             long graphVersion, double speedMultiplier,
+                             long timestampMillis, long tick) {
+        this(vehicleId, x, y, currentSpeed, maxSpeed, direction, laneIndex, inIntersection,
+             approachingIntersection, distanceToStopLine, trafficLightState,
+             distanceToLeadingVehicle, leadingVehicleSpeed, graphVersion, speedMultiplier,
+             timestampMillis, tick,
+             false, null, null, null, 0, 9999.0, 0.0, -1, false, false, false, 9999.0);
     }
 
     public String getVehicleId() {
@@ -127,11 +180,6 @@ public class VehiclePerception implements Serializable {
         return tick;
     }
 
-    /**
-     * Eixo semafórico correspondente à direção física atual:
-     * 0 (N->S) ou 1 (S->N) -> Eixo 0 (Norte-Sul / NS)
-     * 2 (W->E) ou 3 (E->W) -> Eixo 1 (Este-Oeste / EW)
-     */
     public int getAxis() {
         return (direction == 0 || direction == 1) ? 0 : 1;
     }
@@ -148,10 +196,59 @@ public class VehiclePerception implements Serializable {
         return trafficLightState == CitySimulationGUI.LightState.GREEN;
     }
 
+    // Métodos de Acesso à Perceção de Emergências (Fase 6.3)
+    public boolean hasApproachingEmergency() {
+        return hasApproachingEmergency;
+    }
+
+    public String getEmergencyVehicleId() {
+        return emergencyVehicleId;
+    }
+
+    public String getEmergencyCategory() {
+        return emergencyCategory;
+    }
+
+    public String getEmergencyMissionId() {
+        return emergencyMissionId;
+    }
+
+    public int getEmergencyUrgency() {
+        return emergencyUrgency;
+    }
+
+    public double getEmergencyDistanceBehind() {
+        return emergencyDistanceBehind;
+    }
+
+    public double getEmergencyRelativeSpeed() {
+        return emergencyRelativeSpeed;
+    }
+
+    public int getEmergencyLane() {
+        return emergencyLane;
+    }
+
+    public boolean isRightLaneClearForYield() {
+        return isRightLaneClearForYield;
+    }
+
+    public boolean isYieldSafe() {
+        return isYieldSafe;
+    }
+
+    public boolean isApproachingFromBehind() {
+        return approachingFromBehind;
+    }
+
+    public double getEstimatedTimeToArrivalSeconds() {
+        return estimatedTimeToArrivalSeconds;
+    }
+
     @Override
     public String toString() {
-        return String.format("VehiclePerception[%s @ (%.1f, %.1f), dir=%d, lane=%d, v=%.2f, stopDist=%.1f, light=%s, leaderDist=%.1f]",
-                vehicleId, x, y, direction, laneIndex, currentSpeed, distanceToStopLine, trafficLightState, distanceToLeadingVehicle);
+        return String.format("VehiclePerception[%s @ (%.1f, %.1f), dir=%d, lane=%d, v=%.2f, stopDist=%.1f, light=%s, leaderDist=%.1f, emerg=%s]",
+                vehicleId, x, y, direction, laneIndex, currentSpeed, distanceToStopLine, trafficLightState, distanceToLeadingVehicle,
+                hasApproachingEmergency ? (emergencyVehicleId + "(urg=" + emergencyUrgency + ", dist=" + (int)emergencyDistanceBehind + ")") : "none");
     }
 }
-

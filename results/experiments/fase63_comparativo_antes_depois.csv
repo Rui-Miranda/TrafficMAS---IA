@@ -1,0 +1,9 @@
+Metrica,Antes_6_2_D,Depois_6_3,Variacao,Unidade
+TempoMedioViagemPrioritarias,83.40,78.19,-6.2,s
+TempoRetidoBloqueado,23.11,21.91,-5.2,s
+VelocidadeMediaPrioritarias,13.51,13.33,-1.4,px/s
+TempoEsperaMedioNormais,33.16,34.43,1.28,s
+VolumeMensagensFIPA,18,70,52,mensagens
+CedenciasIniciadas,0,13,13,eventos
+CedenciasConcluidas,0,9,9,eventos
+CedenciasInseguras,0,2,2,eventos

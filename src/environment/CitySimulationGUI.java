@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -60,6 +61,14 @@ public class CitySimulationGUI {
         public ManeuverIntent intent = ManeuverIntent.GO_STRAIGHT;
         public int laneIndex = 0; // 0: Faixa exterior/direita, 1: Faixa interior/esquerda
 
+        // Cedência Física e Cooperação de Emergência (Fase 6.3)
+        public VehicleYieldState yieldState = VehicleYieldState.NORMAL_DRIVING;
+        public String yieldingToEmergencyId = null;
+        public EmergencyMission mission = null;
+        public int urgencyLevel = 3;
+        public boolean activeMission = true;
+        public boolean yieldRecorded = false;
+
         // Estado de Navegação A* (Fase 6.1 — R7, R8)
         public int originIntersectionId = 0;
         public int destinationIntersectionId = 0;
@@ -101,6 +110,9 @@ public class CitySimulationGUI {
                 if (lower.contains("bomb") || lower.contains("fire")) this.category = "FIRE_TRUCK";
                 else if (lower.contains("pol")) this.category = "POLICE";
                 else this.category = "AMBULANCE";
+                this.laneIndex = 1; // Prioritárias utilizam a faixa interior/esquerda de ultrapassagem
+                this.urgencyLevel = lower.contains("pol") ? 2 : (lower.contains("bomb") ? 4 : 3);
+                this.mission = new EmergencyMission("MIS_" + id, id, this.category, this.urgencyLevel, "Socorro e Emergencia Prioritaria");
             }
             this.headingAngle = getInitialAngle(direction);
         }
@@ -218,8 +230,16 @@ public class CitySimulationGUI {
     private JButton btnBatchAdd5;
     private JButton btnBatchRemove5;
 
-    // Indicadores de Emergência
+    // Indicadores e Controlo de Emergência & Cedência Física (Fase 6.3)
     private JLabel lblEmergencyStatus;
+    private JComboBox<String> cmbEmergencySelect;
+    private JButton btnEmergencyUrgUp;
+    private JButton btnEmergencyUrgDown;
+    private JButton btnEmergencyToggleMission;
+    private final AtomicLong totalYieldsInitiated = new AtomicLong(0);
+    private final AtomicLong totalYieldsCompleted = new AtomicLong(0);
+    private final AtomicLong totalYieldsUnsafe = new AtomicLong(0);
+    public static volatile boolean yieldCooperationEnabled = true;
 
     // Executor assíncrono dedicado para garantir que ações JADE nunca bloqueiam o EDT do Swing
     private final ExecutorService guiActionExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -405,6 +425,15 @@ public class CitySimulationGUI {
         panel.setBorder(BorderFactory.createCompoundBorder(border, new EmptyBorder(5, 7, 7, 7)));
         panel.setMaximumSize(new Dimension(410, 32767));
         return panel;
+    }
+
+    private JButton createSmallButton(String text, Color bg) {
+        JButton btn = new JButton(text);
+        btn.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        btn.setBackground(bg);
+        btn.setForeground(Color.WHITE);
+        btn.setFocusPainted(false);
+        return btn;
     }
 
     private String[] buildDestinationComboItems() {
@@ -649,20 +678,70 @@ public class CitySimulationGUI {
         cardSemaphore.add(Box.createVerticalStrut(4));
         cardSemaphore.add(lblManualStatus);
 
-        // 5. Emergency Status Card
-        JPanel cardEmergency = createCardPanel("FROTA DE EMERGÊNCIA & PRIORIDADES");
+        // 5. Emergency Status Card (Fase 6.3)
+        JPanel cardEmergency = createCardPanel("FROTA DE EMERGÊNCIA & PRIORIDADES (Fase 6.3)");
 
         lblEmergencyStatus = new JLabel("<html>"
-                + "🚑 <b>Ambulância</b> (AMBULANCE) — Preempção Semafórica Ativa<br>"
-                + "🚒 <b>Bombeiros</b> (FIRE_TRUCK) — Resposta a Incêndio / Sirene Ligada<br>"
-                + "🚓 <b>Polícia</b> (POLICE) — Patrulhamento Urbano / Preempção Disponível<br>"
-                + "<font color='#ffbf70'>* Cedência de passagem física lateral diferida para Fase 6.3.</font>"
+                + "🚑 <b>Ambulância INEM</b>: Urgência 3 | Estado: <font color='#50e380'>ATIVA</font><br>"
+                + "🚒 <b>Bombeiros Sapadores</b>: Urgência 4 | Estado: <font color='#50e380'>ATIVA</font><br>"
+                + "🚓 <b>Polícia Segurança</b>: Urgência 2 | Estado: <font color='#50e380'>ATIVA</font><br>"
+                + "<font color='#5fc3ff'>Cedências Físicas: <b>0</b> concluídas | <b>0</b> ativas</font>"
                 + "</html>");
         lblEmergencyStatus.setFont(new Font("Segoe UI", Font.PLAIN, 10));
         lblEmergencyStatus.setForeground(new Color(220, 230, 245));
         lblEmergencyStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
-
         cardEmergency.add(lblEmergencyStatus);
+        cardEmergency.add(Box.createVerticalStrut(4));
+
+        JPanel emergCtrlRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        emergCtrlRow.setOpaque(false);
+        emergCtrlRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        cmbEmergencySelect = new JComboBox<>(new String[] {
+                "Ambulancia_INEM_01",
+                "Bombeiros_Sapadores_01",
+                "Viatura_Policia_01"
+        });
+        cmbEmergencySelect.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        cmbEmergencySelect.setBackground(new Color(25, 30, 42));
+        cmbEmergencySelect.setForeground(Color.WHITE);
+
+        btnEmergencyUrgUp = createSmallButton("Urg +", new Color(40, 150, 80));
+        btnEmergencyUrgDown = createSmallButton("Urg -", new Color(200, 120, 30));
+        btnEmergencyToggleMission = createSmallButton("Missão", new Color(60, 90, 160));
+
+        btnEmergencyUrgUp.addActionListener(e -> {
+            String sel = (String) cmbEmergencySelect.getSelectedItem();
+            if (sel != null) {
+                int cur = getVehicleUrgency(sel);
+                setVehicleUrgency(sel, cur + 1);
+                refreshEmergencyControlState();
+            }
+        });
+
+        btnEmergencyUrgDown.addActionListener(e -> {
+            String sel = (String) cmbEmergencySelect.getSelectedItem();
+            if (sel != null) {
+                int cur = getVehicleUrgency(sel);
+                setVehicleUrgency(sel, cur - 1);
+                refreshEmergencyControlState();
+            }
+        });
+
+        btnEmergencyToggleMission.addActionListener(e -> {
+            String sel = (String) cmbEmergencySelect.getSelectedItem();
+            if (sel != null) {
+                boolean active = isVehicleActiveMission(sel);
+                setVehicleActiveMission(sel, !active);
+                refreshEmergencyControlState();
+            }
+        });
+
+        emergCtrlRow.add(cmbEmergencySelect);
+        emergCtrlRow.add(btnEmergencyUrgUp);
+        emergCtrlRow.add(btnEmergencyUrgDown);
+        emergCtrlRow.add(btnEmergencyToggleMission);
+        cardEmergency.add(emergCtrlRow);
 
         // Assemble into lateralDashboardPanel with spacing
         lateralDashboardPanel.add(cardHeader);
@@ -1206,6 +1285,7 @@ public class CitySimulationGUI {
         refreshFleetControlState();
         refreshManualControlState();
         refreshVehicleInspectionState();
+        refreshEmergencyControlState();
     }
 
     /**
@@ -1909,6 +1989,128 @@ public class CitySimulationGUI {
         }
     }
 
+    /* =========================================================================
+     * FASE 6.3 — API DE GESTÃO DE MISSÕES DE EMERGÊNCIA E CEDÊNCIA FÍSICA
+     * ========================================================================= */
+
+    public void setVehicleEmergencyMission(String vehicleId, EmergencyMission mission) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        if (v != null) {
+            v.mission = mission;
+            if (mission != null) {
+                v.urgencyLevel = mission.getUrgencyLevel();
+                v.activeMission = mission.isActive();
+            }
+        }
+        Agent ag = VehicleControlGateway.getInstance().getAgent(vehicleId);
+        if (ag instanceof agents.EmergencyVehicleAgent) {
+            ((agents.EmergencyVehicleAgent) ag).setMission(mission);
+        }
+        refreshEmergencyControlState();
+    }
+
+    public void setVehicleUrgency(String vehicleId, int urgency) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        int clamped = Math.max(1, Math.min(5, urgency));
+        if (v != null) {
+            v.urgencyLevel = clamped;
+            if (v.mission != null) {
+                v.mission.setUrgencyLevel(clamped);
+            }
+        }
+        Agent ag = VehicleControlGateway.getInstance().getAgent(vehicleId);
+        if (ag instanceof agents.EmergencyVehicleAgent) {
+            ((agents.EmergencyVehicleAgent) ag).setUrgencyLevel(clamped);
+        }
+        refreshEmergencyControlState();
+    }
+
+    public void setVehicleActiveMission(String vehicleId, boolean active) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        if (v != null) {
+            v.activeMission = active;
+            if (v.mission != null) {
+                v.mission.setState(active ? EmergencyMission.MissionState.EN_ROUTE : EmergencyMission.MissionState.IDLE);
+            }
+        }
+        Agent ag = VehicleControlGateway.getInstance().getAgent(vehicleId);
+        if (ag instanceof agents.EmergencyVehicleAgent) {
+            ((agents.EmergencyVehicleAgent) ag).setActiveMission(active);
+        }
+        refreshEmergencyControlState();
+    }
+
+    public EmergencyMission getEmergencyMission(String vehicleId) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        return (v != null) ? v.mission : null;
+    }
+
+    public int getVehicleUrgency(String vehicleId) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        return (v != null) ? v.urgencyLevel : 0;
+    }
+
+    public boolean isVehicleActiveMission(String vehicleId) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        return (v != null) && v.activeMission;
+    }
+
+    public long getTotalYieldsInitiated() {
+        return totalYieldsInitiated.get();
+    }
+
+    public long getTotalYieldsCompleted() {
+        return totalYieldsCompleted.get();
+    }
+
+    public long getTotalYieldsUnsafe() {
+        return totalYieldsUnsafe.get();
+    }
+
+    public void resetYieldCounters() {
+        totalYieldsInitiated.set(0);
+        totalYieldsCompleted.set(0);
+        totalYieldsUnsafe.set(0);
+    }
+
+    public static boolean isYieldCooperationEnabled() {
+        return yieldCooperationEnabled;
+    }
+
+    public static void setYieldCooperationEnabled(boolean enabled) {
+        yieldCooperationEnabled = enabled;
+    }
+
+    public void refreshEmergencyControlState() {
+        if (lblEmergencyStatus == null) return;
+        StringBuilder sb = new StringBuilder("<html>");
+        VisualVehicle amb = getVisualVehicle("Ambulancia_INEM_01");
+        VisualVehicle bomb = getVisualVehicle("Bombeiros_Sapadores_01");
+        VisualVehicle pol = getVisualVehicle("Viatura_Policia_01");
+
+        appendEmergencyLine(sb, "🚑 Ambulância INEM", amb, 3);
+        appendEmergencyLine(sb, "🚒 Bombeiros Sapadores", bomb, 4);
+        appendEmergencyLine(sb, "🚓 Polícia Segurança", pol, 2);
+
+        sb.append(String.format(Locale.ROOT,
+                "<font color='#5fc3ff'>Cedências Físicas: <b>%d</b> concluídas | <b>%d</b> iniciadas | <b>%d</b> inseguras</font></html>",
+                totalYieldsCompleted.get(), totalYieldsInitiated.get(), totalYieldsUnsafe.get()));
+
+        Runnable r = () -> lblEmergencyStatus.setText(sb.toString());
+        if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(r);
+        } else {
+            r.run();
+        }
+    }
+
+    private void appendEmergencyLine(StringBuilder sb, String label, VisualVehicle v, int defaultUrg) {
+        int urg = (v != null) ? v.urgencyLevel : defaultUrg;
+        boolean active = (v == null || v.activeMission);
+        String state = active ? "<font color='#50e380'>ATIVA</font>" : "<font color='#e35050'>INATIVA</font>";
+        sb.append(label).append(" (Urg: <b>").append(urg).append("</b>) — ").append(state).append("<br>");
+    }
+
     public int performBatchAddNormalVehicles(int count) {
         int added = 0;
         for (int i = 0; i < count; i++) {
@@ -2373,11 +2575,17 @@ public class CitySimulationGUI {
             double distToLeader = getDistanceToLeadingVehicle(v);
             double leaderSpeed = (leaderObj != null) ? leaderObj.currentSpeed : -1.0;
 
+            EmergencyDetectionInfo emergInfo = detectRearEmergency(v, top);
+
             VehiclePerception perception = new VehiclePerception(
                     v.id, v.x, v.y, v.currentSpeed, v.maxSpeed, v.direction, v.laneIndex,
                     v.inIntersection, nextIntersectionIdx, distToStopLine, nextLight,
                     distToLeader, leaderSpeed, roadGraph.getGraphVersion(), globalSpeedMultiplier,
-                    System.currentTimeMillis(), tickCounter);
+                    System.currentTimeMillis(), tickCounter,
+                    emergInfo.detected, emergInfo.vehicleId, emergInfo.category, emergInfo.missionId,
+                    emergInfo.urgencyLevel, emergInfo.distance, emergInfo.relativeSpeed, emergInfo.emergencyLane,
+                    emergInfo.rightLaneClear, emergInfo.pullOverSafe,
+                    emergInfo.approachingFromBehind, emergInfo.estimatedTimeToArrivalSeconds);
             VehicleControlGateway.getInstance().publishPerception(v.id, perception);
 
             // 5. Deliberação Autónoma do VehicleAgent vs. Paragem Controlada vs. Fallback Legacy
@@ -2402,10 +2610,33 @@ public class CitySimulationGUI {
                     v.intent = decision.getPlannedIntent();
                     v.destinationIntersectionId = decision.getDestinationNode();
                     v.originIntersectionId = decision.getOriginNode();
+                    v.yieldState = decision.getYieldState();
+                    v.yieldingToEmergencyId = decision.getYieldTargetVehicleId();
 
-                    // Ajusta a faixa caso a decisão planeie uma viragem diferente
-                    if (distToStopLine > 68.0 && distToStopLine < 230.0 && decision.getDesiredLane() != v.laneIndex) {
-                        alignVehicleLaneWithDesired(v, top, decision.getDesiredLane());
+                    // Gestão dos contadores de cedência física e mudança gradual de faixa (Fase 6.3)
+                    if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
+                        if (!v.yieldRecorded) {
+                            totalYieldsInitiated.incrementAndGet();
+                            v.yieldRecorded = true;
+                        }
+                        performSmoothLateralShift(v, top, decision.getDesiredLane());
+                    } else if (v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE || v.yieldState == VehicleYieldState.YIELDING_STOPPED) {
+                        if (v.yieldRecorded) {
+                            totalYieldsCompleted.incrementAndGet();
+                            v.yieldRecorded = false;
+                        }
+                    } else if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
+                        performSmoothLateralShift(v, top, decision.getDesiredLane());
+                    } else if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
+                        if (!v.yieldRecorded) {
+                            totalYieldsUnsafe.incrementAndGet();
+                            v.yieldRecorded = true;
+                        }
+                    } else {
+                        // Ajusta a faixa caso a decisão planeie uma viragem diferente
+                        if (distToStopLine > 68.0 && distToStopLine < 230.0 && decision.getDesiredLane() != v.laneIndex) {
+                            performSmoothLateralShift(v, top, decision.getDesiredLane());
+                        }
                     }
 
                     if (decision.getAction() == VehicleAction.BRAKE || decision.getAction() == VehicleAction.STOP) {
@@ -2595,23 +2826,173 @@ public class CitySimulationGUI {
         }
     }
 
-    private void alignVehicleLaneWithDesired(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
-        if (v.laneIndex == desiredLane) return;
+    public static class EmergencyDetectionInfo {
+        public boolean detected = false;
+        public boolean approachingFromBehind = false;
+        public double distance = -1.0;
+        public int urgencyLevel = 1;
+        public String vehicleId = "";
+        public String category = "AMBULANCE";
+        public String missionId = "";
+        public int emergencyLane = 1;
+        public boolean rightLaneClear = true;
+        public boolean pullOverSafe = true;
+        public int recommendedLane = 0;
+        public double lateralClearance = 24.0;
+        public double emergencySpeed = 0.0;
+        public double relativeSpeed = 0.0;
+        public double estimatedTimeToArrivalSeconds = 9999.0;
+    }
+
+    private EmergencyDetectionInfo detectRearEmergency(VisualVehicle v, NetworkTopologyConfig top) {
+        EmergencyDetectionInfo info = new EmergencyDetectionInfo();
+        if (!yieldCooperationEnabled || v.isEmergency) return info; // Viaturas prioritárias não cedem a si próprias
 
         int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
-        double targetCoord = top.getLaneCenterCoordinate(corridor, v.direction, desiredLane);
-        double candX = (v.direction == 0 || v.direction == 1) ? targetCoord : v.x;
-        double candY = (v.direction == 0 || v.direction == 1) ? v.y : targetCoord;
+        VisualVehicle nearestEm = null;
+        double minRearDist = Double.MAX_VALUE;
 
         for (VisualVehicle other : vehicles) {
-            if (other == v) continue;
-            if (Math.hypot(other.x - candX, other.y - candY) < 34.0) {
-                return; // Faixa adjacente ocupada; mantém faixa atual com segurança
+            if (!other.isEmergency || !other.activeMission) continue;
+            if (other.direction != v.direction) continue;
+
+            int otherCorridor = (other.direction == 0 || other.direction == 1) ? top.getClosestCol(other.x) : top.getClosestRow(other.y);
+            if (otherCorridor != corridor) continue;
+
+            // Determinar se 'other' está ATRÁS de 'v'
+            double rearDist = -1.0;
+            switch (v.direction) {
+                case 0: // N->S (Y cresce)
+                    if (other.y < v.y) rearDist = v.y - other.y;
+                    break;
+                case 1: // S->N (Y decresce)
+                    if (other.y > v.y) rearDist = other.y - v.y;
+                    break;
+                case 2: // W->E (X cresce)
+                    if (other.x < v.x) rearDist = v.x - other.x;
+                    break;
+                case 3: // E->W (X decresce)
+                    if (other.x > v.x) rearDist = other.x - v.x;
+                    break;
+            }
+
+            if (rearDist > 0.0 && rearDist <= 220.0) { // Alcance de perceção de aproximação
+                if (rearDist < minRearDist) {
+                    minRearDist = rearDist;
+                    nearestEm = other;
+                }
             }
         }
+
+        if (nearestEm != null) {
+            info.detected = true;
+            info.approachingFromBehind = true;
+            info.distance = minRearDist;
+            info.urgencyLevel = nearestEm.urgencyLevel;
+            info.vehicleId = nearestEm.id;
+            info.category = (nearestEm.category != null ? nearestEm.category : "AMBULANCE");
+            info.missionId = (nearestEm.mission != null ? nearestEm.mission.getMissionId() : ("MIS-" + nearestEm.id));
+            info.emergencySpeed = nearestEm.currentSpeed;
+            info.emergencyLane = nearestEm.laneIndex;
+            info.relativeSpeed = Math.max(0.1, nearestEm.currentSpeed - v.currentSpeed);
+            info.estimatedTimeToArrivalSeconds = (info.relativeSpeed > 0.05) ? (minRearDist / (info.relativeSpeed * 30.0)) : 9999.0;
+
+            // Avaliar condições de segurança para desvio para a direita (faixa 0 ou encostamento)
+            double targetRightCoord = top.getLaneCenterCoordinate(corridor, v.direction, 0);
+            boolean rightClear = true;
+            for (VisualVehicle other : vehicles) {
+                if (other == v || other == nearestEm) continue;
+                if (other.direction != v.direction) continue;
+
+                boolean isVert = (v.direction == 0 || v.direction == 1);
+                double longDist = isVert ? Math.abs(other.y - v.y) : Math.abs(other.x - v.x);
+                double latDistToLane0 = isVert ? Math.abs(other.x - targetRightCoord) : Math.abs(other.y - targetRightCoord);
+
+                if (latDistToLane0 < 16.0 && longDist < 36.0) {
+                    rightClear = false;
+                    break;
+                }
+            }
+
+            info.rightLaneClear = rightClear;
+            info.recommendedLane = 0;
+            info.pullOverSafe = (v.laneIndex == 0) || rightClear;
+            info.lateralClearance = (v.laneIndex == 0) ? 12.0 : 24.0;
+        }
+
+        return info;
+    }
+
+    private void performSmoothLateralShift(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
+        int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
+        double targetCoord = top.getLaneCenterCoordinate(corridor, v.direction, desiredLane);
+
+        // Se estiver explicitamente a encostar à berma (PULLING_OVER ou YIELDING_STOPPED) na faixa exterior (0),
+        // calcula coordenada encostada ao bordo da estrada mantendo estritamente o veículo dentro dos 96px da via
+        if ((v.yieldState == VehicleYieldState.PULLING_OVER || v.yieldState == VehicleYieldState.YIELDING_STOPPED) && desiredLane == 0) {
+            int rw = top.getRoadWidth(); // 96 px
+            switch (v.direction) {
+                case 0: // N->S (corredor vertical, tráfego na esquerda)
+                    targetCoord = top.getRoadX(corridor) + 8.5; // veículo tem largura 14 -> borda do veículo a 1.5px do lancil
+                    break;
+                case 1: // S->N (corredor vertical, tráfego na direita)
+                    targetCoord = top.getRoadX(corridor) + rw - 8.5;
+                    break;
+                case 2: // W->E (corredor horizontal, tráfego em baixo)
+                    targetCoord = top.getRoadY(corridor) + rw - 8.5;
+                    break;
+                case 3: // E->W (corredor horizontal, tráfego em cima)
+                    targetCoord = top.getRoadY(corridor) + 8.5;
+                    break;
+            }
+        }
+
+        boolean isVertical = (v.direction == 0 || v.direction == 1);
+        double currentCoord = isVertical ? v.x : v.y;
+        double diff = targetCoord - currentCoord;
+
+        if (Math.abs(diff) < 0.6) {
+            if (isVertical) {
+                v.x = targetCoord;
+                v.headingAngle = (v.direction == 0) ? Math.PI / 2.0 : -Math.PI / 2.0;
+            } else {
+                v.y = targetCoord;
+                v.headingAngle = (v.direction == 2) ? 0.0 : Math.PI;
+            }
+            v.laneIndex = desiredLane;
+            return;
+        }
+
+        // Deslocamento lateral gradual: passo máximo de 0.75 px/tick (cinematicamente contínuo)
+        double step = Math.signum(diff) * Math.min(0.75, Math.abs(diff));
+        double candX = isVertical ? (v.x + step) : v.x;
+        double candY = isVertical ? v.y : (v.y + step);
+
+        // Verificação contínua de colisão durante a transição lateral
+        for (VisualVehicle other : vehicles) {
+            if (other == v) continue;
+            if (Math.hypot(other.x - candX, other.y - candY) < 22.0) {
+                return; // Bloqueado por veículo na transição lateral; suspende avanço lateral
+            }
+        }
+
         v.x = candX;
         v.y = candY;
-        v.laneIndex = desiredLane;
+
+        // Rotação suave do heading angle durante a manobra lateral (+/- 0.12 rad de inclinação)
+        double baseAngle;
+        switch (v.direction) {
+            case 0: baseAngle = Math.PI / 2.0; break;
+            case 1: baseAngle = -Math.PI / 2.0; break;
+            case 2: baseAngle = 0.0; break;
+            default: baseAngle = Math.PI; break;
+        }
+        double tilt = Math.signum(step) * 0.12;
+        v.headingAngle = baseAngle + tilt;
+    }
+
+    private void alignVehicleLaneWithDesired(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
+        performSmoothLateralShift(v, top, desiredLane);
     }
 
     private void alignVehicleLaneWithIntent(VisualVehicle v, NetworkTopologyConfig top) {
@@ -2722,7 +3103,7 @@ public class CitySimulationGUI {
         return (dir == 0 || dir == 1) ? candY : candX;
     }
 
-    private double getDistanceToLeadingVehicle(VisualVehicle v) {
+    public double getDistanceToLeadingVehicle(VisualVehicle v) {
         double minDist = 9999.0;
         for (VisualVehicle other : vehicles) {
             if (other == v || other.direction != v.direction) continue;
@@ -3367,7 +3748,34 @@ public class CitySimulationGUI {
                     g2.setColor(new Color(210, 30, 50));
                     g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
                     String prefix = v.category.equals("FIRE_TRUCK") ? "[BOM] " : (v.category.equals("POLICE") ? "[POL] " : "[AMB] ");
-                    g2.drawString(prefix + v.id, (int) Math.round(v.x) - 18, (int) Math.round(v.y) - 10);
+                    String urgTag = " U" + v.urgencyLevel + (v.activeMission ? "" : " (INAT)");
+                    g2.drawString(prefix + v.id + urgTag, (int) Math.round(v.x) - 24, (int) Math.round(v.y) - 10);
+                } else if (v.yieldState != null && v.yieldState != VehicleYieldState.NORMAL_DRIVING) {
+                    // Badge de estado de cedência física a viatura prioritária (Fase 6.3)
+                    g2.setFont(new Font("Segoe UI", Font.BOLD, 8));
+                    String badge;
+                    Color badgeBg;
+                    if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
+                        badge = "CEDER >>";
+                        badgeBg = new Color(255, 140, 0, 220);
+                    } else if (v.yieldState == VehicleYieldState.YIELDING_STOPPED || v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
+                        badge = "CEDIDO";
+                        badgeBg = new Color(34, 139, 34, 220);
+                    } else if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
+                        badge = "INSEGURO";
+                        badgeBg = new Color(220, 20, 60, 220);
+                    } else if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
+                        badge = "RETOMA";
+                        badgeBg = new Color(70, 130, 180, 220);
+                    } else {
+                        badge = v.yieldState.name();
+                        badgeBg = new Color(100, 110, 125, 220);
+                    }
+                    int bw = g2.getFontMetrics().stringWidth(badge) + 6;
+                    g2.setColor(badgeBg);
+                    g2.fillRoundRect((int) Math.round(v.x) - bw / 2, (int) Math.round(v.y) - 17, bw, 11, 4, 4);
+                    g2.setColor(Color.WHITE);
+                    g2.drawString(badge, (int) Math.round(v.x) - bw / 2 + 3, (int) Math.round(v.y) - 8);
                 } else {
                     // Micro-badge limpo para veículos normais não selecionados
                     g2.setFont(new Font("Segoe UI", Font.BOLD, 8));
@@ -3404,12 +3812,14 @@ public class CitySimulationGUI {
             g2.setFont(new Font("Segoe UI", Font.PLAIN, 10));
             g2.drawString(interCount + " Cruzamentos | " + (interCount * 2) + " Semáforos | A* + Manhattan", hudX + 14, hudY + 35);
 
-            // Linha 2: Status do Ambiente e ML
+            // Linha 2: Status do Ambiente e Cedência a Emergências
             boolean hasAlert = globalSpeedMultiplier < 0.95;
             g2.setColor(hasAlert ? new Color(220, 50, 50) : new Color(30, 140, 60));
             g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
             String statusPrefix = hasAlert ? "[ALERTA] " : "[OK] ";
             String mlText = (mlPredictionNotice != null && !mlPredictionNotice.isEmpty()) ? " | " + mlPredictionNotice : "";
+            String yieldHud = " | Cedências: " + totalYieldsCompleted + " concl. (" + totalYieldsInitiated + " inic., " + totalYieldsUnsafe + " inseg.)";
+            g2.drawString(statusPrefix + disruptionNotice + mlText + yieldHud, hudX + 14, hudY + 58);
             g2.drawString(statusPrefix + disruptionNotice + mlText, hudX + 14, hudY + 58);
 
             long normalCars = vehicles.stream().filter(v -> !v.isEmergency).count();

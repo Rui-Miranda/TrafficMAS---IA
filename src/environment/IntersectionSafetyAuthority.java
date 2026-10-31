@@ -67,20 +67,42 @@ public class IntersectionSafetyAuthority {
         MULTIAGENT_ML
     }
 
-    /** Estrutura imutável de um pedido de emergência */
+    /** Estrutura imutável de um pedido de emergência (Fase 6.3: Estendida com categoria, urgência e missão) */
     public static class EmergencyRequest {
         public final String vehicleId;
         public final int axis; // 0 = NS, 1 = EW
         public final long requestTime;
         public final String senderAID;
+        public final String category; // AMBULANCE, FIRE_TRUCK, POLICE
+        public final int urgencyLevel; // 1 a 5
+        public final String missionId;
+        public final EmergencyMission mission;
         private EmergencyStatus status;
 
-        public EmergencyRequest(String vehicleId, int axis, long requestTime, String senderAID) {
+        public EmergencyRequest(String vehicleId, int axis, long requestTime, String senderAID,
+                                String category, int urgencyLevel, String missionId, EmergencyMission mission) {
             this.vehicleId = vehicleId;
             this.axis = axis;
             this.requestTime = requestTime;
             this.senderAID = senderAID;
+            this.category = (category != null) ? category : "AMBULANCE";
+            this.urgencyLevel = (urgencyLevel > 0) ? urgencyLevel : 3;
+            this.missionId = missionId;
+            this.mission = mission;
             this.status = EmergencyStatus.RECEBIDO;
+        }
+
+        public EmergencyRequest(String vehicleId, int axis, long requestTime, String senderAID) {
+            this(vehicleId, axis, requestTime, senderAID, "AMBULANCE", 3, null, null);
+        }
+
+        public double calculateServicePriority(long nowMillis) {
+            if (mission != null) {
+                return mission.calculateServicePriority(nowMillis);
+            }
+            long waitSeconds = Math.max(0L, (nowMillis - requestTime) / 1000L);
+            double starvationBonus = Math.min(50.0, waitSeconds * 2.5);
+            return (this.urgencyLevel * 100.0) + starvationBonus;
         }
 
         public EmergencyStatus getStatus() {
@@ -93,8 +115,8 @@ public class IntersectionSafetyAuthority {
 
         @Override
         public String toString() {
-            return "EmergencyRequest[id=" + vehicleId + ", axis=" + (axis == 0 ? "NS" : "EW") 
-                    + ", status=" + status + "]";
+            return "EmergencyRequest[id=" + vehicleId + ", cat=" + category + ", urg=" + urgencyLevel
+                    + ", axis=" + (axis == 0 ? "NS" : "EW") + ", status=" + status + "]";
         }
     }
 
@@ -490,6 +512,10 @@ public class IntersectionSafetyAuthority {
         return currentlyServingEmergency != null || !emergencyQueue.isEmpty();
     }
 
+    public synchronized EmergencyRequest getActiveEmergency() {
+        return currentlyServingEmergency != null ? currentlyServingEmergency : emergencyQueue.peek();
+    }
+
     public synchronized ManualOverrideRequest getActiveManualRequest() {
         return activeManualRequest;
     }
@@ -799,7 +825,12 @@ public class IntersectionSafetyAuthority {
      * @param senderAID AID do agente remetente para notificações
      * @return O pedido registado ou existente
      */
-    public synchronized EmergencyRequest requestEmergency(String vehicleId, int axis, String senderAID) {
+    /**
+     * Submete um pedido de emergência com garantia de idempotência, prioridade por missão e anti-debouncing.
+     */
+    public synchronized EmergencyRequest requestEmergency(String vehicleId, int axis, String senderAID,
+                                                          String category, int urgencyLevel,
+                                                          String missionId, EmergencyMission mission) {
         long now = SimulationClock.currentTimeMillis();
 
         // 1. Idempotência / Anti-debouncing: se o mesmo veículo já tem pedido pendente ou ativo
@@ -815,8 +846,8 @@ public class IntersectionSafetyAuthority {
             return existing;
         }
 
-        // 2. Novo pedido: cria e regista
-        EmergencyRequest newReq = new EmergencyRequest(vehicleId, axis, now, senderAID);
+        // 2. Novo pedido: cria e regista com metadados de missão e urgência
+        EmergencyRequest newReq = new EmergencyRequest(vehicleId, axis, now, senderAID, category, urgencyLevel, missionId, mission);
         activeRequestsByVehicle.put(vehicleId, newReq);
         emergencyQueue.add(newReq);
         metrics.TrafficMetricsCollector.getInstance().recordEmergencyRequest(vehicleId, intersectionIndex, axis);
@@ -853,6 +884,10 @@ public class IntersectionSafetyAuthority {
         avaliaEFazProgressoEmergencia();
 
         return newReq;
+    }
+
+    public synchronized EmergencyRequest requestEmergency(String vehicleId, int axis, String senderAID) {
+        return requestEmergency(vehicleId, axis, senderAID, "AMBULANCE", 3, null, null);
     }
 
     /**
@@ -901,10 +936,57 @@ public class IntersectionSafetyAuthority {
 
     /**
      * Avalia a fila de emergências e orienta as transições da máquina de estados.
+     * Implementa arbitragem dinâmica por prioridade de serviço (urgência da missão + anti-inanição).
      */
     private synchronized void avaliaEFazProgressoEmergencia() {
+        long now = SimulationClock.currentTimeMillis();
+
+        // Se a emergência selecionada ainda está apenas em ACEITE (ainda não concedeu verde nem atravessou)
+        // e existe na fila uma emergência de maior urgência/prioridade, reavalia para servir a mais urgente
+        if (currentlyServingEmergency != null && currentlyServingEmergency.getStatus() == EmergencyStatus.ACEITE && !emergencyQueue.isEmpty()) {
+            EmergencyRequest bestQueued = null;
+            double curPrio = currentlyServingEmergency.calculateServicePriority(now);
+            double bestQueuedPrio = curPrio;
+            for (EmergencyRequest r : emergencyQueue) {
+                double rPrio = r.calculateServicePriority(now);
+                if (rPrio > bestQueuedPrio) {
+                    bestQueuedPrio = rPrio;
+                    bestQueued = r;
+                }
+            }
+            if (bestQueued != null) {
+                emergencyQueue.remove(bestQueued);
+                emergencyQueue.add(currentlyServingEmergency);
+                currentlyServingEmergency = bestQueued;
+                emergencyMaxHoldUntil = now + 8000;
+            }
+        }
+
         if (currentlyServingEmergency == null && !emergencyQueue.isEmpty()) {
-            currentlyServingEmergency = emergencyQueue.poll();
+            if (emergencyQueue.size() == 1) {
+                currentlyServingEmergency = emergencyQueue.poll();
+            } else {
+                EmergencyRequest best = null;
+                for (EmergencyRequest r : emergencyQueue) {
+                    if (best == null) {
+                        best = r;
+                    } else {
+                        double pBest = best.calculateServicePriority(now);
+                        double pCurr = r.calculateServicePriority(now);
+                        if (pCurr > pBest) {
+                            best = r;
+                        } else if (Math.abs(pCurr - pBest) < 0.001) {
+                            if (r.requestTime < best.requestTime) {
+                                best = r;
+                            } else if (r.requestTime == best.requestTime && r.vehicleId.compareTo(best.vehicleId) < 0) {
+                                best = r;
+                            }
+                        }
+                    }
+                }
+                emergencyQueue.remove(best);
+                currentlyServingEmergency = best;
+            }
             emergencyMaxHoldUntil = SimulationClock.currentTimeMillis() + 8000; // Timeout de segurança máxima (8s)
         }
 

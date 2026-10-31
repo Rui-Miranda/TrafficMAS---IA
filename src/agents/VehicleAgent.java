@@ -11,6 +11,7 @@ import environment.VehicleAction;
 import environment.VehicleControlGateway;
 import environment.VehicleDecision;
 import environment.VehiclePerception;
+import environment.VehicleYieldState;
 import jade.core.AID;
 import jade.core.Agent;
 import jade.core.behaviours.CyclicBehaviour;
@@ -84,6 +85,11 @@ public class VehicleAgent extends Agent {
     private long stoppedSinceMillis = 0L;
     private double currentWaitTimeSeconds = 0.0;
 
+    // Estado da Máquina de Estados de Cedência a Emergências (Fase 6.3)
+    private VehicleYieldState yieldState = VehicleYieldState.NORMAL_DRIVING;
+    private String yieldEmergencyVehicleId = null;
+    private long yieldStateChangedMillis = 0L;
+
     // Comunicação FIPA-ACL
     private final long[] lastRequestPerIntersection = new long[16];
     private int lastRequestedIntersection = -1;
@@ -135,15 +141,19 @@ public class VehicleAgent extends Agent {
             }
         });
 
-        // 6. Comportamento Cíclico de Escuta FIPA-ACL (filtrado para não interceptar mensagens do DF)
-        final MessageTemplate trafficTemplate = MessageTemplate.MatchOntology("traffic-management");
+        // 6. Comportamento Cíclico de Escuta FIPA-ACL (tráfego e cedência de emergências)
         addBehaviour(new CyclicBehaviour(this) {
             private static final long serialVersionUID = 1L;
             @Override
             public void action() {
-                ACLMessage reply = receive(trafficTemplate);
-                if (reply != null) {
-                    processarRespostaFIPA(reply);
+                ACLMessage msg = receive();
+                if (msg != null) {
+                    String ont = msg.getOntology();
+                    if ("traffic-management".equalsIgnoreCase(ont)) {
+                        processarRespostaFIPA(msg);
+                    } else if ("emergency-yield".equalsIgnoreCase(ont)) {
+                        processarYieldFIPA(msg);
+                    }
                 } else {
                     block();
                 }
@@ -268,6 +278,70 @@ public class VehicleAgent extends Agent {
             this.desiredLane = 0;
         }
 
+        // 2.5 RACIOCÍNIO — COOPERAÇÃO E MÁQUINA DE ESTADOS DE CEDÊNCIA A EMERGÊNCIAS (Fase 6.3)
+        if (p.hasApproachingEmergency() && p.isApproachingFromBehind()) {
+            this.yieldEmergencyVehicleId = p.getEmergencyVehicleId();
+            if (this.yieldState == VehicleYieldState.NORMAL_DRIVING) {
+                this.yieldState = VehicleYieldState.EMERGENCY_DETECTED;
+                this.yieldStateChangedMillis = System.currentTimeMillis();
+            }
+
+            if (this.yieldState == VehicleYieldState.EMERGENCY_DETECTED) {
+                this.yieldState = VehicleYieldState.EVALUATING_YIELD;
+                this.yieldStateChangedMillis = System.currentTimeMillis();
+            }
+
+            if (this.yieldState == VehicleYieldState.EVALUATING_YIELD) {
+                if (p.isYieldSafe()) {
+                    if (p.getLaneIndex() == 1) {
+                        this.desiredLane = 0;
+                        this.yieldState = VehicleYieldState.YIELDING_RIGHT;
+                        this.yieldStateChangedMillis = System.currentTimeMillis();
+                        emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.AGREE,
+                                "YIELD_IN_PROGRESS: vehicle=" + getLocalName() + "; targetLane=0; missionId=" + p.getEmergencyMissionId());
+                    } else {
+                        this.desiredLane = 0;
+                        this.yieldState = VehicleYieldState.YIELDING_STOPPED;
+                        this.yieldStateChangedMillis = System.currentTimeMillis();
+                        emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.INFORM,
+                                "YIELD_COMPLETED: vehicle=" + getLocalName() + "; freedLane=1; missionId=" + p.getEmergencyMissionId());
+                    }
+                } else {
+                    this.yieldState = VehicleYieldState.YIELD_NOT_SAFE;
+                    this.yieldStateChangedMillis = System.currentTimeMillis();
+                    emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.REFUSE,
+                            "YIELD_UNSAFE: vehicle=" + getLocalName() + "; reason=RIGHT_LANE_OCCUPIED; missionId=" + p.getEmergencyMissionId());
+                }
+            } else if (this.yieldState == VehicleYieldState.YIELDING_RIGHT) {
+                this.desiredLane = 0;
+                if (p.getLaneIndex() == 0) {
+                    this.yieldState = VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE;
+                    this.yieldStateChangedMillis = System.currentTimeMillis();
+                    emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.INFORM,
+                            "YIELD_COMPLETED: vehicle=" + getLocalName() + "; freedLane=1; missionId=" + p.getEmergencyMissionId());
+                }
+            } else if (this.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
+                if (p.isYieldSafe()) {
+                    this.yieldState = VehicleYieldState.EVALUATING_YIELD;
+                    this.yieldStateChangedMillis = System.currentTimeMillis();
+                }
+            }
+        } else {
+            if (this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE
+                    || this.yieldState == VehicleYieldState.YIELDING_STOPPED) {
+                this.yieldState = VehicleYieldState.RESUMING_ROUTE;
+                this.yieldStateChangedMillis = System.currentTimeMillis();
+            } else if (this.yieldState == VehicleYieldState.RESUMING_ROUTE) {
+                if (p.getCurrentSpeed() > 1.0 || (System.currentTimeMillis() - this.yieldStateChangedMillis > 2000L)) {
+                    this.yieldState = VehicleYieldState.NORMAL_DRIVING;
+                    this.yieldEmergencyVehicleId = null;
+                }
+            } else if (this.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
+                this.yieldState = VehicleYieldState.NORMAL_DRIVING;
+                this.yieldEmergencyVehicleId = null;
+            }
+        }
+
         // 3. RACIOCÍNIO — DELIBERAÇÃO CINEMÁTICA E SEGURANÇA
         boolean leaderObstacle = p.hasLeadingObstacle(38.0);
         boolean approachingStopLine = p.isApproachingStopLine(65.0);
@@ -279,7 +353,15 @@ public class VehicleAgent extends Agent {
         double effectiveMaxSpeed = p.getMaxSpeed() * p.getSpeedMultiplier();
         this.lastCycleFipaRequested = false;
 
-        if (shouldBrake) {
+        if (this.yieldState == VehicleYieldState.YIELDING_STOPPED || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
+            action = VehicleAction.STOP;
+            this.targetSpeed = 0.0;
+            this.drivingState = "YIELD_WAITING_EMERGENCY_PASSAGE";
+        } else if (this.yieldState == VehicleYieldState.YIELDING_RIGHT) {
+            action = VehicleAction.BRAKE;
+            this.targetSpeed = Math.min(effectiveMaxSpeed * 0.5, 1.4);
+            this.drivingState = "YIELDING_RIGHT_LANE_CHANGE";
+        } else if (shouldBrake) {
             double limitDist = leaderObstacle
                     ? (brakeForSignal ? Math.min(p.getDistanceToLeadingVehicle() - 32.0, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - 32.0))
                     : p.getDistanceToStopLine();
@@ -347,12 +429,58 @@ public class VehicleAgent extends Agent {
                 routeNodes,
                 this.drivingState,
                 explanation,
-                this.lastCycleFipaRequested
+                this.lastCycleFipaRequested,
+                this.yieldState,
+                this.yieldEmergencyVehicleId
         );
 
         this.lastDecision = decision;
         VehicleControlGateway.getInstance().publishDecision(decision);
         return decision;
+    }
+
+    public VehicleYieldState getYieldState() {
+        return yieldState;
+    }
+
+    public void setYieldState(VehicleYieldState yieldState) {
+        this.yieldState = (yieldState != null) ? yieldState : VehicleYieldState.NORMAL_DRIVING;
+    }
+
+    public String getYieldEmergencyVehicleId() {
+        return yieldEmergencyVehicleId;
+    }
+
+    private void emitirYieldFipaReply(String receiverId, int performative, String content) {
+        if (receiverId == null || receiverId.isEmpty()) return;
+        ACLMessage msg = new ACLMessage(performative);
+        msg.addReceiver(new AID(receiverId, AID.ISLOCALNAME));
+        msg.setOntology("emergency-yield");
+        msg.setConversationId("yield-conv-" + getLocalName() + "-" + receiverId);
+        msg.setContent(content);
+        send(msg);
+        TrafficMetricsCollector.getInstance().recordFipaMessage();
+    }
+
+    private void processarYieldFIPA(ACLMessage msg) {
+        String content = msg.getContent();
+        if (content == null) return;
+
+        if (content.contains("YIELD_REQUEST")) {
+            this.yieldEmergencyVehicleId = msg.getSender().getLocalName();
+            if (this.yieldState == VehicleYieldState.NORMAL_DRIVING) {
+                this.yieldState = VehicleYieldState.EMERGENCY_DETECTED;
+                this.yieldStateChangedMillis = System.currentTimeMillis();
+            }
+            emitirYieldFipaReply(msg.getSender().getLocalName(), ACLMessage.CONFIRM,
+                    "YIELD_ACK: vehicle=" + getLocalName() + "; state=" + this.yieldState);
+        } else if (content.contains("EMERGENCY_PASSED")) {
+            if (this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE
+                    || this.yieldState == VehicleYieldState.YIELDING_STOPPED) {
+                this.yieldState = VehicleYieldState.RESUMING_ROUTE;
+                this.yieldStateChangedMillis = System.currentTimeMillis();
+            }
+        }
     }
 
     /**

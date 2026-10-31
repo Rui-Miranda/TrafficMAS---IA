@@ -6,16 +6,19 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Decisão Deliberativa formulada autonomamente pelo VehicleAgent (Fase 6.2-D).
+ * Decisão Deliberativa formulada autonomamente pelo VehicleAgent (Fase 6.2-D / Fase 6.3).
  *
  * Cada decisão possui identificador único sequencial, timestamp de emissão e
  * validade temporal (TTL). O motor de simulação apenas executa decisões válidas
  * e recentes; decisões obsoletas ou ausência de decisão por suspensão do agente
  * resultam em paragem controlada segura.
+ *
+ * Fase 6.3: Estendido com estado da máquina de cedência (VehicleYieldState) e
+ * alvo da cedência a viaturas prioritárias.
  */
 public class VehicleDecision implements Serializable {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     private final String vehicleId;
     private final long decisionSequence;
@@ -32,11 +35,16 @@ public class VehicleDecision implements Serializable {
     private final String statusExplanation;
     private final boolean requestFipaPriority;
 
+    // Campos de Cedência Física e Cooperação Multiagente (Fase 6.3)
+    private final VehicleYieldState yieldState;
+    private final String yieldTargetVehicleId;
+
     public VehicleDecision(String vehicleId, long decisionSequence, long timestampMillis, long validUntilMillis,
                            VehicleAction action, double targetSpeed,
                            CitySimulationGUI.ManeuverIntent plannedIntent, int desiredLane,
                            int originNode, int destinationNode, List<Integer> activeRouteNodes,
-                           String drivingState, String statusExplanation, boolean requestFipaPriority) {
+                           String drivingState, String statusExplanation, boolean requestFipaPriority,
+                           VehicleYieldState yieldState, String yieldTargetVehicleId) {
         this.vehicleId = vehicleId;
         this.decisionSequence = decisionSequence;
         this.timestampMillis = timestampMillis;
@@ -53,6 +61,35 @@ public class VehicleDecision implements Serializable {
         this.drivingState = (drivingState != null) ? drivingState : "NORMAL";
         this.statusExplanation = (statusExplanation != null) ? statusExplanation : "";
         this.requestFipaPriority = requestFipaPriority;
+        this.yieldState = (yieldState != null) ? yieldState : VehicleYieldState.NORMAL_DRIVING;
+        this.yieldTargetVehicleId = yieldTargetVehicleId;
+    }
+
+    /**
+     * Construtor Retrocompatível da Fase 6.2-D.
+     */
+    public VehicleDecision(String vehicleId, long decisionSequence, long timestampMillis, long validUntilMillis,
+                           VehicleAction action, double targetSpeed,
+                           CitySimulationGUI.ManeuverIntent plannedIntent, int desiredLane,
+                           int originNode, int destinationNode, List<Integer> activeRouteNodes,
+                           String drivingState, String statusExplanation, boolean requestFipaPriority) {
+        this(vehicleId, decisionSequence, timestampMillis, validUntilMillis, action, targetSpeed,
+             plannedIntent, desiredLane, originNode, destinationNode, activeRouteNodes,
+             drivingState, statusExplanation, requestFipaPriority,
+             VehicleYieldState.NORMAL_DRIVING, null);
+    }
+
+    /**
+     * Construtor auxiliar para testes de cedência física e controlo deliberativo (Fase 6.3).
+     */
+    public VehicleDecision(String vehicleId, VehicleAction action, double targetSpeed,
+                           CitySimulationGUI.ManeuverIntent plannedIntent, int desiredLane,
+                           int originNode, int destinationNode,
+                           long timestampMillis, long validUntilMillis,
+                           VehicleYieldState yieldState, String yieldTargetVehicleId) {
+        this(vehicleId, 1L, timestampMillis, validUntilMillis, action, targetSpeed,
+             plannedIntent, desiredLane, originNode, destinationNode, Collections.emptyList(),
+             "DELIBERATIVE_TEST", "", false, yieldState, yieldTargetVehicleId);
     }
 
     /**
@@ -73,7 +110,9 @@ public class VehicleDecision implements Serializable {
                 Collections.emptyList(),
                 "CONTROLLED_STOP",
                 reason,
-                false
+                false,
+                VehicleYieldState.NORMAL_DRIVING,
+                null
         );
     }
 
@@ -137,6 +176,18 @@ public class VehicleDecision implements Serializable {
         return requestFipaPriority;
     }
 
+    public VehicleYieldState getYieldState() {
+        return yieldState;
+    }
+
+    public String getYieldTargetVehicleId() {
+        return yieldTargetVehicleId;
+    }
+
+    public boolean isYielding() {
+        return yieldState != null && yieldState.isYieldingActive();
+    }
+
     public boolean isExpired(long currentTimeMillis) {
         return currentTimeMillis > validUntilMillis;
     }
@@ -147,8 +198,7 @@ public class VehicleDecision implements Serializable {
 
     @Override
     public String toString() {
-        return String.format("VehicleDecision[#%d %s: action=%s, vTarget=%.2f, intent=%s, lane=%d, state=%s, dest=%d]",
-                decisionSequence, vehicleId, action, targetSpeed, plannedIntent, desiredLane, drivingState, destinationNode);
+        return String.format("VehicleDecision[#%d %s: action=%s, vTarget=%.2f, intent=%s, lane=%d, state=%s, yield=%s, dest=%d]",
+                decisionSequence, vehicleId, action, targetSpeed, plannedIntent, desiredLane, drivingState, yieldState, destinationNode);
     }
 }
-
