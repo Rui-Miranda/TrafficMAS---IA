@@ -304,27 +304,36 @@ public class EmergencyVehicleAgent extends Agent {
             }
         }
 
-        // 3. Deliberação e Controlo Cinemático Autónomo
-        boolean obstacleAhead = p.hasLeadingObstacle(36.0);
-        boolean redLightAhead = p.isApproachingStopLine(65.0) && !p.isLightGreen() && crossingState != VehicleCrossingState.PASSAGEM_SEGURA;
+        // 3. Deliberação e Controlo Cinemático Autónomo Adaptado à Meteorologia (Fase 6.4)
+        double safeSpeedFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeSpeedFactor() : 1.0;
+        double safeDistanceFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeDistanceFactor() : 1.0;
+        double effectiveMaxSpeed = p.getMaxSpeed() * safeSpeedFactor;
+
+        double baseObstacleThreshold = 36.0 * safeDistanceFactor;
+        double stopLineThreshold = Math.max(65.0, 65.0 * safeDistanceFactor);
+
+        boolean obstacleAhead = p.hasLeadingObstacle(baseObstacleThreshold);
+        boolean redLightAhead = p.isApproachingStopLine(stopLineThreshold) && !p.isLightGreen() && crossingState != VehicleCrossingState.PASSAGEM_SEGURA;
         VehicleAction act;
         double targetSpd;
 
         if (obstacleAhead || redLightAhead) {
+            double safetyMarginPx = 32.0 * safeDistanceFactor;
             double limitDist = obstacleAhead
-                    ? (redLightAhead ? Math.min(p.getDistanceToLeadingVehicle() - 32.0, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - 32.0))
+                    ? (redLightAhead ? Math.min(p.getDistanceToLeadingVehicle() - safetyMarginPx, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - safetyMarginPx))
                     : p.getDistanceToStopLine();
 
-            if (limitDist <= 3.5) {
+            if (limitDist <= (3.5 * safeDistanceFactor)) {
                 act = VehicleAction.STOP;
                 targetSpd = 0.0;
             } else {
                 act = VehicleAction.BRAKE;
-                targetSpd = Math.max(0.0, (limitDist / 45.0) * p.getMaxSpeed());
+                double rampDist = 45.0 * safeDistanceFactor;
+                targetSpd = Math.max(0.0, (limitDist / rampDist) * effectiveMaxSpeed);
             }
         } else {
             act = VehicleAction.ACCELERATE;
-            targetSpd = p.getMaxSpeed();
+            targetSpd = effectiveMaxSpeed;
         }
 
         publicarDecisaoEmergencia(p, act, targetSpd, 1, "MISSAO_ATIVA_" + category);

@@ -1,13 +1,13 @@
-# Script PowerShell para Execucao das Suites de Testes do TrafficMAS (Fases 1 a 6.3)
+# Script PowerShell para Execucao das Suites de Testes do TrafficMAS (Fases 1 a 6.4)
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "   TRAFFICMAS -- EXECUCAO DAS SUITES DE TESTES AUTOMATIZADOS (FASES 1 A 6.3)" -ForegroundColor Cyan
+Write-Host "   TRAFFICMAS -- EXECUCAO DAS SUITES DE TESTES AUTOMATIZADOS (FASES 1 A 6.4)" -ForegroundColor Cyan
 Write-Host "================================================================================`n" -ForegroundColor Cyan
 
 if (-not (Test-Path "bin")) {
     New-Item -ItemType Directory -Path "bin" | Out-Null
 }
 
-Write-Host "[1/17] A compilar fontes e testes..." -ForegroundColor Yellow
+Write-Host "[1/18] A compilar fontes e testes..." -ForegroundColor Yellow
 javac -encoding UTF-8 -cp ".;lib/jade.jar;lib/commons-codec-1.3.jar" -d bin src/Main.java src/agents/*.java src/environment/*.java src/ml/*.java src/metrics/*.java src/experiments/*.java src/test/*.java
 
 if ($LASTEXITCODE -ne 0) {
@@ -153,7 +153,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[17/17] A executar suite de validacao da Fase 6.3 (Cedencia Fisica a Emergencias e Cooperacao Multiagente)..." -ForegroundColor Green
+Write-Host "[17/18] A executar suite de validacao da Fase 6.3 (Cedencia Fisica a Emergencias e Cooperacao Multiagente)..." -ForegroundColor Green
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase63YieldValidationTestSuite
 
 if ($LASTEXITCODE -ne 0) {
@@ -162,6 +162,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
+Write-Host "[18/18] A executar suite de validacao da Fase 6.4 (Meteorologia Dinamica, Histerese do Piso e Adaptacao Multiagente)..." -ForegroundColor Green
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase64WeatherValidationTestSuite
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERRO] Testes da Fase 6.4 falharam!" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+Write-Host ""
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "   TODAS AS 16 SUITES DE TESTES (219 TESTES - FASES 1 A 6.3) FORAM CONCLUIDAS!" -ForegroundColor Green
+Write-Host "   TODAS AS 17 SUITES DE TESTES (245 TESTES - FASES 1 A 6.4) FORAM CONCLUIDAS!" -ForegroundColor Green
 Write-Host "================================================================================" -ForegroundColor Cyan

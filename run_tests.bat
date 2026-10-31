@@ -165,7 +165,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [17/17] A executar suite de validação da Fase 6.3 (Cedência Física e Cooperação Multiagente)...
+echo [17/18] A executar suite de validação da Fase 6.3 (Cedência Física e Cooperação Multiagente)...
 java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase63YieldValidationTestSuite
 
 if %ERRORLEVEL% NEQ 0 (
@@ -175,7 +175,17 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo [18/18] A executar suite de validação da Fase 6.4 (Meteorologia Dinâmica e Condições da Estrada)...
+java "-Djava.awt.headless=true" -cp "bin;lib/jade.jar;lib/commons-codec-1.3.jar" test.Phase64WeatherValidationTestSuite
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] Testes da Fase 6.4 falharam!
+    pause
+    exit /b %ERRORLEVEL%
+)
+
+echo.
 echo ================================================================================
-echo    TODAS AS 16 SUITES DE TESTES (219 TESTES - FASES 1 A 6.3) FORAM CONCLUÍDAS!
+echo    TODAS AS 17 SUITES DE TESTES (245 TESTES - FASES 1 A 6.4) FORAM CONCLUÍDAS!
 echo ================================================================================
 pause

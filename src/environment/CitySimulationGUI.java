@@ -241,6 +241,14 @@ public class CitySimulationGUI {
     private final AtomicLong totalYieldsUnsafe = new AtomicLong(0);
     public static volatile boolean yieldCooperationEnabled = true;
 
+    // Componentes de Controlo de Meteorologia e Piso (Fase 6.4)
+    private JLabel lblWeatherStatus;
+    private JComboBox<WeatherType> cmbWeatherSelect;
+    private JComboBox<RoadCondition> cmbRoadConditionSelect;
+    private JButton btnWeatherApply;
+    private JButton btnRoadAutoMode;
+    private JLabel lblTransitionNotice;
+
     // Executor assíncrono dedicado para garantir que ações JADE nunca bloqueiam o EDT do Swing
     private final ExecutorService guiActionExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "TrafficMAS-GUI-Worker");
@@ -743,6 +751,76 @@ public class CitySimulationGUI {
         emergCtrlRow.add(btnEmergencyToggleMission);
         cardEmergency.add(emergCtrlRow);
 
+        // 6. Meteorologia & Condições do Piso Card (Fase 6.4)
+        JPanel cardWeather = createCardPanel("METEOROLOGIA & CONDIÇÕES DA VIA (Fase 6.4)");
+
+        lblWeatherStatus = new JLabel("<html><b>Meteorologia:</b> Céu Limpo | <b>Piso:</b> Seco [Auto]<br><font color='#72d572'>Atrito: 1.00 | Velocidade Segura: 100%</font></html>");
+        lblWeatherStatus.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        lblWeatherStatus.setForeground(new Color(220, 230, 245));
+        lblWeatherStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+        cardWeather.add(lblWeatherStatus);
+        cardWeather.add(Box.createVerticalStrut(4));
+
+        lblTransitionNotice = new JLabel("Transição: Estável");
+        lblTransitionNotice.setFont(new Font("Segoe UI", Font.ITALIC, 9));
+        lblTransitionNotice.setForeground(new Color(170, 190, 215));
+        lblTransitionNotice.setAlignmentX(Component.LEFT_ALIGNMENT);
+        cardWeather.add(lblTransitionNotice);
+        cardWeather.add(Box.createVerticalStrut(4));
+
+        JPanel weatherCtrlRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        weatherCtrlRow1.setOpaque(false);
+        weatherCtrlRow1.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        cmbWeatherSelect = new JComboBox<>(WeatherType.values());
+        cmbWeatherSelect.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        cmbWeatherSelect.setBackground(new Color(25, 30, 42));
+        cmbWeatherSelect.setForeground(Color.WHITE);
+
+        cmbRoadConditionSelect = new JComboBox<>(RoadCondition.values());
+        cmbRoadConditionSelect.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+        cmbRoadConditionSelect.setBackground(new Color(25, 30, 42));
+        cmbRoadConditionSelect.setForeground(Color.WHITE);
+
+        btnWeatherApply = createSmallButton("Aplicar", new Color(35, 120, 200));
+        btnRoadAutoMode = createSmallButton("Piso Auto", new Color(40, 150, 90));
+
+        btnWeatherApply.addActionListener(e -> {
+            WeatherType wt = (WeatherType) cmbWeatherSelect.getSelectedItem();
+            RoadCondition rc = (RoadCondition) cmbRoadConditionSelect.getSelectedItem();
+            guiActionExecutor.submit(() -> {
+                if (wt != null) {
+                    WeatherEnvironmentManager.getInstance().setWeather(wt);
+                }
+                if (rc != null && rc != WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition()) {
+                    WeatherEnvironmentManager.getInstance().setManualRoadCondition(rc);
+                }
+                SwingUtilities.invokeLater(this::refreshWeatherControlState);
+            });
+        });
+
+        btnRoadAutoMode.addActionListener(e -> {
+            guiActionExecutor.submit(() -> {
+                WeatherEnvironmentManager.getInstance().returnToAutomaticRoadMode();
+                SwingUtilities.invokeLater(this::refreshWeatherControlState);
+            });
+        });
+
+        weatherCtrlRow1.add(new JLabel("Céu:"));
+        weatherCtrlRow1.add(cmbWeatherSelect);
+        weatherCtrlRow1.add(new JLabel("Piso:"));
+        weatherCtrlRow1.add(cmbRoadConditionSelect);
+
+        JPanel weatherCtrlRow2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        weatherCtrlRow2.setOpaque(false);
+        weatherCtrlRow2.setAlignmentX(Component.LEFT_ALIGNMENT);
+        weatherCtrlRow2.add(btnWeatherApply);
+        weatherCtrlRow2.add(btnRoadAutoMode);
+
+        cardWeather.add(weatherCtrlRow1);
+        cardWeather.add(Box.createVerticalStrut(4));
+        cardWeather.add(weatherCtrlRow2);
+
         // Assemble into lateralDashboardPanel with spacing
         lateralDashboardPanel.add(cardHeader);
         lateralDashboardPanel.add(Box.createVerticalStrut(6));
@@ -753,6 +831,8 @@ public class CitySimulationGUI {
         lateralDashboardPanel.add(cardSemaphore);
         lateralDashboardPanel.add(Box.createVerticalStrut(6));
         lateralDashboardPanel.add(cardEmergency);
+        lateralDashboardPanel.add(Box.createVerticalStrut(6));
+        lateralDashboardPanel.add(cardWeather);
         lateralDashboardPanel.add(Box.createVerticalGlue());
 
         lateralScrollPane = new JScrollPane(lateralDashboardPanel);
@@ -1286,6 +1366,7 @@ public class CitySimulationGUI {
         refreshManualControlState();
         refreshVehicleInspectionState();
         refreshEmergencyControlState();
+        refreshWeatherControlState();
     }
 
     /**
@@ -2111,6 +2192,48 @@ public class CitySimulationGUI {
         sb.append(label).append(" (Urg: <b>").append(urg).append("</b>) — ").append(state).append("<br>");
     }
 
+    public void refreshWeatherControlState() {
+        if (lblWeatherStatus == null) return;
+        WeatherStateSnapshot snap = WeatherEnvironmentManager.getInstance().getSnapshot();
+        StringBuilder sb = new StringBuilder("<html>");
+        sb.append("<b>Meteorologia:</b> ").append(snap.getWeatherType().getDisplayName());
+        sb.append(" | <b>Piso:</b> ").append(snap.getRoadCondition().getDisplayName());
+        sb.append(snap.isManualRoadOverride() ? " [Manual]" : " [Auto]");
+        sb.append("<br><font color='#72d572'>Atrito: ").append(String.format(Locale.ROOT, "%.2f", snap.getFriction()))
+          .append(" | Vel. Segura: ").append((int)(snap.getSafeSpeedFactor() * 100)).append("%")
+          .append(" | Dist. Segura: +").append((int)((snap.getSafeDistanceFactor() - 1.0) * 100)).append("%</font>");
+        sb.append("</html>");
+
+        String statusStr = sb.toString();
+        String transStr;
+        Color transColor;
+        boolean inTrans = WeatherEnvironmentManager.getInstance().isTransitionInProgress();
+        if (inTrans) {
+            double rem = WeatherEnvironmentManager.getInstance().getRemainingTransitionSec();
+            RoadCondition target = WeatherEnvironmentManager.getInstance().getTransitionTargetRoad();
+            transStr = String.format(Locale.ROOT, "Transição: a secar para %s (%.1fs rest.)",
+                    (target != null ? target.getDisplayName() : "Seco"), rem);
+            transColor = new Color(245, 180, 50);
+        } else {
+            transStr = snap.isManualRoadOverride() ? "Modo Piso: Sob Controlo Manual" : "Transição: Estável";
+            transColor = new Color(170, 190, 215);
+        }
+
+        Runnable r = () -> {
+            lblWeatherStatus.setText(statusStr);
+            if (lblTransitionNotice != null) {
+                lblTransitionNotice.setText(transStr);
+                lblTransitionNotice.setForeground(transColor);
+            }
+        };
+
+        if (windowFrame != null && !SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(r);
+        } else {
+            r.run();
+        }
+    }
+
     public int performBatchAddNormalVehicles(int count) {
         int added = 0;
         for (int i = 0; i < count; i++) {
@@ -2518,6 +2641,7 @@ public class CitySimulationGUI {
      */
     public synchronized void stepSimulationTick() {
         tickCounter++;
+        WeatherEnvironmentManager.getInstance().updateSimulationTick();
         int interCount = topology.getIntersectionCount();
         metrics.TrafficMetricsCollector.getInstance().advanceSimulatedTime(0.03333333333333333);
         if (tickCounter % 30 == 0) {
@@ -2577,6 +2701,12 @@ public class CitySimulationGUI {
 
             EmergencyDetectionInfo emergInfo = detectRearEmergency(v, top);
 
+            WeatherStateSnapshot weatherSnap = WeatherEnvironmentManager.getInstance().getSnapshot();
+            RoadCondition roadCond = weatherSnap.getRoadCondition();
+            double safeDist = 38.0 * roadCond.getSafeDistanceFactor();
+            double stoppingDist = roadCond.calculateStoppingDistance(v.currentSpeed, 4.0);
+            double maxDecel = roadCond.getServiceDeceleration();
+
             VehiclePerception perception = new VehiclePerception(
                     v.id, v.x, v.y, v.currentSpeed, v.maxSpeed, v.direction, v.laneIndex,
                     v.inIntersection, nextIntersectionIdx, distToStopLine, nextLight,
@@ -2585,7 +2715,9 @@ public class CitySimulationGUI {
                     emergInfo.detected, emergInfo.vehicleId, emergInfo.category, emergInfo.missionId,
                     emergInfo.urgencyLevel, emergInfo.distance, emergInfo.relativeSpeed, emergInfo.emergencyLane,
                     emergInfo.rightLaneClear, emergInfo.pullOverSafe,
-                    emergInfo.approachingFromBehind, emergInfo.estimatedTimeToArrivalSeconds);
+                    emergInfo.approachingFromBehind, emergInfo.estimatedTimeToArrivalSeconds,
+                    weatherSnap.getWeatherType(), roadCond, roadCond.getFrictionCoefficient(),
+                    weatherSnap.getVisibilityKm(), safeDist, stoppingDist, maxDecel, weatherSnap.getStateVersion());
             VehicleControlGateway.getInstance().publishPerception(v.id, perception);
 
             // 5. Deliberação Autónoma do VehicleAgent vs. Paragem Controlada vs. Fallback Legacy
@@ -2963,8 +3095,9 @@ public class CitySimulationGUI {
             return;
         }
 
-        // Deslocamento lateral gradual: passo máximo de 0.75 px/tick (cinematicamente contínuo)
-        double step = Math.signum(diff) * Math.min(0.75, Math.abs(diff));
+        // Deslocamento lateral gradual adaptado à aderência do piso (Fase 6.4)
+        double maxShift = WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition().getMaxLateralShiftRate();
+        double step = Math.signum(diff) * Math.min(maxShift, Math.abs(diff));
         double candX = isVertical ? (v.x + step) : v.x;
         double candY = isVertical ? v.y : (v.y + step);
 
@@ -3333,6 +3466,9 @@ public class CitySimulationGUI {
                 // 6. Veículos com Rotação Suave Dinâmica e Luzes
                 drawVehicles(g2);
 
+                // 6.1 Efeitos Atmosféricos Discretos (Chuva / Neve - Fase 6.4)
+                drawWeatherEffects(g2, worldW, worldH);
+
                 // 7. HUD / Dashboard Superior
                 drawHUD(g2, worldW);
             } finally {
@@ -3475,7 +3611,24 @@ public class CitySimulationGUI {
             int rw = top.getRoadWidth();
             int lw = top.getLaneWidth();
 
-            Color asphalt = new Color(52, 55, 62);
+            WeatherStateSnapshot weatherSnap = WeatherEnvironmentManager.getInstance().getSnapshot();
+            RoadCondition rc = weatherSnap.getRoadCondition();
+            Color asphalt;
+            switch (rc) {
+                case WET:
+                    asphalt = new Color(36, 40, 48); // Asfalto escurecido e reluzente por humidade
+                    break;
+                case SNOW_COVERED:
+                    asphalt = new Color(185, 195, 208); // Cobertura branca acinzentada de neve
+                    break;
+                case ICY:
+                    asphalt = new Color(110, 135, 160); // Tom vítreo azulado com brilho de gelo
+                    break;
+                case DRY:
+                default:
+                    asphalt = new Color(52, 55, 62); // Asfalto seco padrão
+                    break;
+            }
             g2.setColor(asphalt);
             for (int ix : rx) {
                 g2.fillRect(ix, 0, rw, height);
@@ -3787,6 +3940,34 @@ public class CitySimulationGUI {
             }
         }
 
+        private void drawWeatherEffects(Graphics2D g2, int width, int height) {
+            WeatherStateSnapshot snap = WeatherEnvironmentManager.getInstance().getSnapshot();
+            WeatherType wt = snap.getWeatherType();
+            if (wt == WeatherType.CLEAR) return;
+
+            long t = tickCounter;
+            Stroke oldStroke = g2.getStroke();
+            if (wt == WeatherType.RAIN) {
+                g2.setColor(new Color(170, 205, 245, 90));
+                g2.setStroke(new BasicStroke(1.2f));
+                int count = 120;
+                for (int i = 0; i < count; i++) {
+                    int rx = (int) ((i * 73 + t * 9) % width);
+                    int ry = (int) ((i * 47 + t * 18) % height);
+                    g2.drawLine(rx, ry, rx - 3, ry + 10);
+                }
+            } else if (wt == WeatherType.SNOW) {
+                g2.setColor(new Color(255, 255, 255, 140));
+                int count = 90;
+                for (int i = 0; i < count; i++) {
+                    int sx = (int) ((i * 89 + (int)(Math.sin((t + i) * 0.1) * 6)) % width);
+                    int sy = (int) ((i * 53 + t * 4) % height);
+                    g2.fillOval(sx, sy, 3, 3);
+                }
+            }
+            g2.setStroke(oldStroke);
+        }
+
         private void drawHUD(Graphics2D g2, int width) {
             NetworkTopologyConfig top = topology;
             int interCount = top.getIntersectionCount();
@@ -3813,14 +3994,15 @@ public class CitySimulationGUI {
             g2.drawString(interCount + " Cruzamentos | " + (interCount * 2) + " Semáforos | A* + Manhattan", hudX + 14, hudY + 35);
 
             // Linha 2: Status do Ambiente e Cedência a Emergências
-            boolean hasAlert = globalSpeedMultiplier < 0.95;
+            WeatherStateSnapshot wSnap = WeatherEnvironmentManager.getInstance().getSnapshot();
+            boolean hasAlert = globalSpeedMultiplier < 0.95 || wSnap.getRoadCondition() != RoadCondition.DRY;
             g2.setColor(hasAlert ? new Color(220, 50, 50) : new Color(30, 140, 60));
             g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
             String statusPrefix = hasAlert ? "[ALERTA] " : "[OK] ";
+            String weatherText = " | " + wSnap.getWeatherType().getCode() + " + " + wSnap.getRoadCondition().getCode() + " (Atrito=" + String.format(Locale.ROOT, "%.2f", wSnap.getFriction()) + ")";
             String mlText = (mlPredictionNotice != null && !mlPredictionNotice.isEmpty()) ? " | " + mlPredictionNotice : "";
-            String yieldHud = " | Cedências: " + totalYieldsCompleted + " concl. (" + totalYieldsInitiated + " inic., " + totalYieldsUnsafe + " inseg.)";
-            g2.drawString(statusPrefix + disruptionNotice + mlText + yieldHud, hudX + 14, hudY + 58);
-            g2.drawString(statusPrefix + disruptionNotice + mlText, hudX + 14, hudY + 58);
+            String yieldHud = " | Cedências: " + totalYieldsCompleted + " concl.";
+            g2.drawString(statusPrefix + disruptionNotice + weatherText + mlText + yieldHud, hudX + 14, hudY + 58);
 
             long normalCars = vehicles.stream().filter(v -> !v.isEmergency).count();
             long priorityCars = vehicles.stream().filter(v -> v.isEmergency).count();

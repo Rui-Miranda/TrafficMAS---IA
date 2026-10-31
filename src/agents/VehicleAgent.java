@@ -342,15 +342,24 @@ public class VehicleAgent extends Agent {
             }
         }
 
-        // 3. RACIOCÍNIO — DELIBERAÇÃO CINEMÁTICA E SEGURANÇA
-        boolean leaderObstacle = p.hasLeadingObstacle(38.0);
-        boolean approachingStopLine = p.isApproachingStopLine(65.0);
+        // 3. RACIOCÍNIO — DELIBERAÇÃO CINEMÁTICA E SEGURANÇA ADAPTADA À METEOROLOGIA (Fase 6.4)
+        double friction = p.getFrictionCoefficient();
+        double safeSpeedFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeSpeedFactor() : 1.0;
+        double safeDistanceFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeDistanceFactor() : 1.0;
+
+        // Limiar de seguimento adaptado ao atrito e aderência do piso
+        double baseFollowThreshold = (p.getSafeFollowingDistance() > 0.0) ? p.getSafeFollowingDistance() : (38.0 * safeDistanceFactor);
+        double stopLineThreshold = Math.max(65.0, 65.0 * safeDistanceFactor);
+
+        boolean leaderObstacle = p.hasLeadingObstacle(baseFollowThreshold);
+        boolean approachingStopLine = p.isApproachingStopLine(stopLineThreshold);
         boolean signalNotGreen = !p.isLightGreen();
         boolean brakeForSignal = approachingStopLine && signalNotGreen;
         boolean shouldBrake = leaderObstacle || brakeForSignal;
 
         VehicleAction action;
-        double effectiveMaxSpeed = p.getMaxSpeed() * p.getSpeedMultiplier();
+        // Velocidade máxima adaptada à velocidade segura do piso e meteorologia
+        double effectiveMaxSpeed = p.getMaxSpeed() * p.getSpeedMultiplier() * safeSpeedFactor;
         this.lastCycleFipaRequested = false;
 
         if (this.yieldState == VehicleYieldState.YIELDING_STOPPED || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
@@ -359,20 +368,22 @@ public class VehicleAgent extends Agent {
             this.drivingState = "YIELD_WAITING_EMERGENCY_PASSAGE";
         } else if (this.yieldState == VehicleYieldState.YIELDING_RIGHT) {
             action = VehicleAction.BRAKE;
-            this.targetSpeed = Math.min(effectiveMaxSpeed * 0.5, 1.4);
+            this.targetSpeed = Math.min(effectiveMaxSpeed * 0.5, 1.4 * safeSpeedFactor);
             this.drivingState = "YIELDING_RIGHT_LANE_CHANGE";
         } else if (shouldBrake) {
+            double safetyMarginPx = 32.0 * safeDistanceFactor;
             double limitDist = leaderObstacle
-                    ? (brakeForSignal ? Math.min(p.getDistanceToLeadingVehicle() - 32.0, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - 32.0))
+                    ? (brakeForSignal ? Math.min(p.getDistanceToLeadingVehicle() - safetyMarginPx, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - safetyMarginPx))
                     : p.getDistanceToStopLine();
 
-            if (limitDist <= 3.0) {
+            if (limitDist <= (3.0 * safeDistanceFactor)) {
                 action = VehicleAction.STOP;
                 this.targetSpeed = 0.0;
                 this.drivingState = leaderObstacle ? "STOPPED_BEHIND_LEADER" : "STOPPED_AT_RED_LIGHT";
             } else {
                 action = VehicleAction.BRAKE;
-                this.targetSpeed = Math.max(0.0, (limitDist / 50.0) * effectiveMaxSpeed);
+                double rampDist = 50.0 * safeDistanceFactor;
+                this.targetSpeed = Math.max(0.0, (limitDist / rampDist) * effectiveMaxSpeed);
                 this.drivingState = leaderObstacle ? "BRAKING_FOR_LEADER" : "BRAKING_FOR_SIGNAL";
             }
 

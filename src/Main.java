@@ -4,6 +4,8 @@ import environment.FleetLifecycleManager;
 import environment.IntersectionSafetyAuthority;
 import environment.NetworkTopologyConfig;
 import environment.TrafficEnvironment;
+import environment.WeatherEnvironmentManager;
+import environment.WeatherType;
 import jade.core.Profile;
 import jade.core.ProfileImpl;
 import jade.core.Runtime;
@@ -352,6 +354,21 @@ public class Main {
                     System.out.println("[Main][t=" + s + "s][Fase 6.3] Captura PNG de Cedência Física guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
                     try {
                         String brainArtifact = "C:/Users/etien/.gemini/antigravity/brain/8e70ea93-be67-4250-98f3-a72f34a8bd5b/gui_fase63_cedencia_fisica_emergencia.png";
+                        gui.exportGuiScreenshot(brainArtifact);
+                    } catch (Throwable ignored) {}
+                }
+                if (s == 26 && seconds >= 28) {
+                    // Fase 6.4: Transição meteorológica dinâmica para chuva e piso molhado
+                    WeatherEnvironmentManager env = WeatherEnvironmentManager.getInstance();
+                    env.setWeather(WeatherType.RAIN);
+                    System.out.println("[Main][t=" + s + "s][Fase 6.4] Meteorologia alterada para RAIN -> Piso WET com histerese ativa.");
+                }
+                if (s == 28 && seconds >= 29 && screenshotDir != null) {
+                    String path = screenshotDir + "/gui_fase64_meteorologia_dinamica.png";
+                    boolean saved = gui.exportGuiScreenshot(path);
+                    System.out.println("[Main][t=" + s + "s][Fase 6.4] Captura PNG de Meteorologia Dinâmica guardada (" + path + "): " + (saved ? "SUCESSO" : "FALHA"));
+                    try {
+                        String brainArtifact = "C:/Users/etien/.gemini/antigravity/brain/8e70ea93-be67-4250-98f3-a72f34a8bd5b/gui_fase64_meteorologia_dinamica.png";
                         gui.exportGuiScreenshot(brainArtifact);
                     } catch (Throwable ignored) {}
                 }

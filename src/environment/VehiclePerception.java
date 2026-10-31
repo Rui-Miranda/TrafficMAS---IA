@@ -3,17 +3,20 @@ package environment;
 import java.io.Serializable;
 
 /**
- * Snapshot Sensorial disponibilizado pelo ambiente físico ao VehicleAgent (Fase 6.2-D / Fase 6.3).
+ * Snapshot Sensorial disponibilizado pelo ambiente físico ao VehicleAgent (Fase 6.2-D / Fase 6.3 / Fase 6.4).
  *
  * Encapsula de forma imutável todas as perceções locais do veículo no paradigma:
  * PERCEÇÃO -> RACIOCÍNIO -> AÇÃO.
  *
  * Fase 6.3: Estendido com perceções de viaturas prioritárias em aproximação pela retaguarda,
  * estado da missão, urgência e viabilidade física de cedência de passagem (mudança de faixa segura).
+ *
+ * Fase 6.4: Estendido com condições meteorológicas, estado físico da superfície da via,
+ * atrito disponível, visibilidade atmosférica, distância de segurança ajustada e parâmetros de travagem.
  */
 public class VehiclePerception implements Serializable {
 
-    private static final long serialVersionUID = 2L;
+    private static final long serialVersionUID = 3L;
 
     private final String vehicleId;
     private final double x;
@@ -29,7 +32,7 @@ public class VehiclePerception implements Serializable {
     private final double distanceToLeadingVehicle; // Distância ao líder na mesma faixa (px, ou 9999.0 se livre)
     private final double leadingVehicleSpeed; // Velocidade do líder (-1 se nenhum)
     private final long graphVersion; // Versão de topologia do RoadNetworkGraph
-    private final double speedMultiplier; // Multiplicador ambiental de velocidade (ex: atrito/chuva)
+    private final double speedMultiplier; // Multiplicador ambiental de velocidade
     private final long timestampMillis;
     private final long tick;
 
@@ -47,8 +50,18 @@ public class VehiclePerception implements Serializable {
     private final boolean approachingFromBehind;
     private final double estimatedTimeToArrivalSeconds;
 
+    // Campos de Meteorologia e Condições da Estrada (Fase 6.4)
+    private final WeatherType weatherType;
+    private final RoadCondition roadCondition;
+    private final double frictionCoefficient;
+    private final double visibilityKm;
+    private final double safeFollowingDistance;
+    private final double safeStoppingDistance;
+    private final double maxSafeDeceleration;
+    private final long weatherStateVersion;
+
     /**
-     * Construtor Completo da Fase 6.3 (com perceção de emergências e cedência física).
+     * Construtor Completo da Fase 6.4 (Meteorologia Dinâmica e Condições da Estrada).
      */
     public VehiclePerception(String vehicleId, double x, double y, double currentSpeed, double maxSpeed,
                              int direction, int laneIndex, boolean inIntersection,
@@ -62,7 +75,11 @@ public class VehiclePerception implements Serializable {
                              int emergencyUrgency, double emergencyDistanceBehind,
                              double emergencyRelativeSpeed, int emergencyLane,
                              boolean isRightLaneClearForYield, boolean isYieldSafe,
-                             boolean approachingFromBehind, double estimatedTimeToArrivalSeconds) {
+                             boolean approachingFromBehind, double estimatedTimeToArrivalSeconds,
+                             WeatherType weatherType, RoadCondition roadCondition,
+                             double frictionCoefficient, double visibilityKm,
+                             double safeFollowingDistance, double safeStoppingDistance,
+                             double maxSafeDeceleration, long weatherStateVersion) {
         this.vehicleId = vehicleId;
         this.x = x;
         this.y = y;
@@ -93,6 +110,41 @@ public class VehiclePerception implements Serializable {
         this.isYieldSafe = isYieldSafe;
         this.approachingFromBehind = approachingFromBehind;
         this.estimatedTimeToArrivalSeconds = estimatedTimeToArrivalSeconds;
+
+        this.weatherType = (weatherType != null) ? weatherType : WeatherType.CLEAR;
+        this.roadCondition = (roadCondition != null) ? roadCondition : RoadCondition.DRY;
+        this.frictionCoefficient = (frictionCoefficient > 0.0) ? frictionCoefficient : this.roadCondition.getFrictionCoefficient();
+        this.visibilityKm = (visibilityKm > 0.0) ? visibilityKm : this.weatherType.getVisibilityKm();
+        this.safeFollowingDistance = safeFollowingDistance;
+        this.safeStoppingDistance = safeStoppingDistance;
+        this.maxSafeDeceleration = maxSafeDeceleration;
+        this.weatherStateVersion = weatherStateVersion;
+    }
+
+    /**
+     * Construtor Retrocompatível da Fase 6.3 (com perceção de emergências e valores padrão da meteorologia).
+     */
+    public VehiclePerception(String vehicleId, double x, double y, double currentSpeed, double maxSpeed,
+                             int direction, int laneIndex, boolean inIntersection,
+                             int approachingIntersection, double distanceToStopLine,
+                             CitySimulationGUI.LightState trafficLightState,
+                             double distanceToLeadingVehicle, double leadingVehicleSpeed,
+                             long graphVersion, double speedMultiplier,
+                             long timestampMillis, long tick,
+                             boolean hasApproachingEmergency, String emergencyVehicleId,
+                             String emergencyCategory, String emergencyMissionId,
+                             int emergencyUrgency, double emergencyDistanceBehind,
+                             double emergencyRelativeSpeed, int emergencyLane,
+                             boolean isRightLaneClearForYield, boolean isYieldSafe,
+                             boolean approachingFromBehind, double estimatedTimeToArrivalSeconds) {
+        this(vehicleId, x, y, currentSpeed, maxSpeed, direction, laneIndex, inIntersection,
+             approachingIntersection, distanceToStopLine, trafficLightState,
+             distanceToLeadingVehicle, leadingVehicleSpeed, graphVersion, speedMultiplier,
+             timestampMillis, tick,
+             hasApproachingEmergency, emergencyVehicleId, emergencyCategory, emergencyMissionId,
+             emergencyUrgency, emergencyDistanceBehind, emergencyRelativeSpeed, emergencyLane,
+             isRightLaneClearForYield, isYieldSafe, approachingFromBehind, estimatedTimeToArrivalSeconds,
+             WeatherType.CLEAR, RoadCondition.DRY, 1.0, 10.0, 38.0, 15.0, 0.12, 1L);
     }
 
     /**
@@ -109,7 +161,8 @@ public class VehiclePerception implements Serializable {
              approachingIntersection, distanceToStopLine, trafficLightState,
              distanceToLeadingVehicle, leadingVehicleSpeed, graphVersion, speedMultiplier,
              timestampMillis, tick,
-             false, null, null, null, 0, 9999.0, 0.0, -1, false, false, false, 9999.0);
+             false, null, null, null, 0, 9999.0, 0.0, -1, false, false, false, 9999.0,
+             WeatherType.CLEAR, RoadCondition.DRY, 1.0, 10.0, 38.0, 15.0, 0.12, 1L);
     }
 
     public String getVehicleId() {
@@ -245,10 +298,43 @@ public class VehiclePerception implements Serializable {
         return estimatedTimeToArrivalSeconds;
     }
 
+    // Métodos de Acesso à Perceção Meteorológica e de Estrada (Fase 6.4)
+    public WeatherType getWeatherType() {
+        return weatherType;
+    }
+
+    public RoadCondition getRoadCondition() {
+        return roadCondition;
+    }
+
+    public double getFrictionCoefficient() {
+        return frictionCoefficient;
+    }
+
+    public double getVisibilityKm() {
+        return visibilityKm;
+    }
+
+    public double getSafeFollowingDistance() {
+        return safeFollowingDistance;
+    }
+
+    public double getSafeStoppingDistance() {
+        return safeStoppingDistance;
+    }
+
+    public double getMaxSafeDeceleration() {
+        return maxSafeDeceleration;
+    }
+
+    public long getWeatherStateVersion() {
+        return weatherStateVersion;
+    }
+
     @Override
     public String toString() {
-        return String.format("VehiclePerception[%s @ (%.1f, %.1f), dir=%d, lane=%d, v=%.2f, stopDist=%.1f, light=%s, leaderDist=%.1f, emerg=%s]",
-                vehicleId, x, y, direction, laneIndex, currentSpeed, distanceToStopLine, trafficLightState, distanceToLeadingVehicle,
-                hasApproachingEmergency ? (emergencyVehicleId + "(urg=" + emergencyUrgency + ", dist=" + (int)emergencyDistanceBehind + ")") : "none");
+        return String.format("VehiclePerception[%s @ (%.1f, %.1f), dir=%d, lane=%d, v=%.2f, stopDist=%.1f, light=%s, weather=%s/%s, friction=%.2f]",
+                vehicleId, x, y, direction, laneIndex, currentSpeed, distanceToStopLine, trafficLightState,
+                weatherType.getCode(), roadCondition.getCode(), frictionCoefficient);
     }
 }
