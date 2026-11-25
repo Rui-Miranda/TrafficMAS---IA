@@ -469,7 +469,9 @@ public class EmergencyVehicleAgent extends Agent {
             targetSpd = effectiveMaxSpeed;
         }
 
-        publicarDecisaoEmergencia(p, act, targetSpd, 1, "MISSAO_ATIVA_" + category, useCentralCorridor);
+        // Em via livre: faixa direita (0) quando vai virar à direita; faixa esquerda (1) em frente ou à esquerda
+        int desiredLane = (!useCentralCorridor && this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) ? 0 : 1;
+        publicarDecisaoEmergencia(p, act, targetSpd, desiredLane, "MISSAO_ATIVA_" + category, useCentralCorridor);
     }
 
     private void atualizarRotaAStarEmergencia(VehiclePerception p, NetworkTopologyConfig topo, CitySimulationGUI gui) {
@@ -717,17 +719,30 @@ public class EmergencyVehicleAgent extends Agent {
         CitySimulationGUI.VisualVehicle vv = gui.getVisualVehicle(getLocalName());
         if (vv == null) return;
 
+        int emTargetInter = topo.getTargetIntersection(p.getX(), p.getY(), p.getDirection());
+        boolean emOnExitRamp = (topo.getDistanceToTargetStopLine(p.getX(), p.getY(), p.getDirection()) < -10.0);
+        int nextStraight = (!emOnExitRamp && this.plannedIntent == CitySimulationGUI.ManeuverIntent.GO_STRAIGHT)
+                ? getAdjacentCorridorIntersection(topo, emTargetInter, p.getDirection()) : -1;
+
         java.util.List<CitySimulationGUI.VisualVehicle> snapshot = gui.getVisualVehiclesSnapshot();
         for (CitySimulationGUI.VisualVehicle other : snapshot) {
-            if (other.id.equals(getLocalName()) || other.isEmergency) continue;
+            if (other.offMapStandby || other.id.equals(getLocalName()) || other.isEmergency) continue;
             if (other.direction != p.getDirection()) continue;
 
-            // Mesmo corredor
+            // Mesmo corredor e mesma rua/segmento (ou segmento seguinte apenas se a emergência vai em frente)
             boolean sameCorridor = (p.getDirection() <= 1)
                     ? (topo.getClosestCol(other.x) == topo.getClosestCol(p.getX()))
                     : (topo.getClosestRow(other.y) == topo.getClosestRow(p.getY()));
 
             if (!sameCorridor) continue;
+
+            int otherTarget = topo.getTargetIntersection(other.x, other.y, other.direction);
+            boolean otherOnExitRamp = (topo.getDistanceToTargetStopLine(other.x, other.y, other.direction) < -10.0);
+            boolean sameSeg = (otherTarget == emTargetInter && otherOnExitRamp == emOnExitRamp);
+            boolean nextSeg = (!emOnExitRamp && this.plannedIntent == CitySimulationGUI.ManeuverIntent.GO_STRAIGHT)
+                    && ((nextStraight >= 0) ? (otherTarget == nextStraight && !otherOnExitRamp)
+                    : (otherTarget == emTargetInter && otherOnExitRamp));
+            if (!sameSeg && !nextSeg) continue;
 
             // À frente da emergência dentro de 140px
             double distAhead = 9999.0;
