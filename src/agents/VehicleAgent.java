@@ -85,11 +85,14 @@ public class VehicleAgent extends Agent {
     private long stoppedSinceMillis = 0L;
     private double currentWaitTimeSeconds = 0.0;
 
-    // Estado da Máquina de Estados de Cedência a Emergências (Fase 6.3)
+    // Estado da Máquina de Estados de Cedência a Emergências (Fase 6.3 + Corredor de Emergência PT)
     private VehicleYieldState yieldState = VehicleYieldState.NORMAL_DRIVING;
     private String yieldEmergencyVehicleId = null;
+    private double desiredLateralOffsetPx = 0.0;
     private long yieldStateChangedMillis = 0L;
     private long yieldCooldownUntilMillis = 0L;
+    /** Distância configurável de deteção traseira para abertura do Corredor de Emergência (px) */
+    public static final double CORRIDOR_DETECTION_DISTANCE_PX = 280.0;
     /** Tempo máximo que uma viatura permanece imobilizada em cedência antes de avançar para descongestionar (ms) */
     private static final long MAX_YIELD_STOP_DURATION_MS = 2200L;
     /** Janela de retoma após desbloqueio de cedência para impedir ciclos de paragem imediata (ms) */
@@ -234,8 +237,12 @@ public class VehicleAgent extends Agent {
 
         if (this.activeRoute.reachable) {
             this.plannedIntent = this.activeRoute.getManeuverForIntersection(originNode);
-            // Regra de trânsito: faixa direita (0) para em frente e direita; faixa esquerda (1) para virar à esquerda
-            this.desiredLane = (this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_LEFT) ? 1 : 0;
+            // Veículos normais circulam em ambas as faixas: direita (0) para virar à direita, esquerda (1) para virar à esquerda
+            if (this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) {
+                this.desiredLane = 0;
+            } else if (this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_LEFT) {
+                this.desiredLane = 1;
+            }
         }
     }
 
@@ -278,112 +285,52 @@ public class VehicleAgent extends Agent {
         // Determina a manobra planeada para o próximo cruzamento
         if (this.activeRoute != null && this.activeRoute.reachable && approachingIdx >= 0) {
             this.plannedIntent = this.activeRoute.getManeuverForIntersection(approachingIdx);
-            // Mantém faixa direita (0) por defeito para em frente/direita, deixando a faixa esquerda (1) desimpedida para emergências e viragens à esquerda
-            this.desiredLane = (this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_LEFT) ? 1 : 0;
-        } else {
-            this.plannedIntent = CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
-            this.desiredLane = 0;
-        }
-
-        // 2.5 RACIOCÍNIO — COOPERAÇÃO E MÁQUINA DE ESTADOS DE CEDÊNCIA A EMERGÊNCIAS (Fase 6.3)
-        long nowYield = System.currentTimeMillis();
-        if (p.hasApproachingEmergency() && p.isApproachingFromBehind()) {
-            this.yieldEmergencyVehicleId = p.getEmergencyVehicleId();
-            boolean sameLaneAsEmergency = (p.getEmergencyLane() >= 0 && p.getLaneIndex() == p.getEmergencyLane());
-            boolean inResumeCooldown = (nowYield < this.yieldCooldownUntilMillis);
-
-            // Se a emergência está diretamente atrás na MESMA faixa 0 (exterior), NUNCA travar à frente dela:
-            // avançar normalmente para desimpedir a via e impedir bloqueios (deadlock).
-            if (p.getLaneIndex() == 0 && sameLaneAsEmergency) {
-                if (this.yieldState == VehicleYieldState.YIELDING_STOPPED
-                        || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
-                    this.yieldState = VehicleYieldState.RESUMING_ROUTE;
-                    this.yieldStateChangedMillis = nowYield;
-                    this.yieldCooldownUntilMillis = nowYield + YIELD_RESUME_COOLDOWN_MS;
-                } else if (this.yieldState != VehicleYieldState.RESUMING_ROUTE) {
-                    this.yieldState = VehicleYieldState.NORMAL_DRIVING;
-                }
-            } else if (this.yieldState == VehicleYieldState.RESUMING_ROUTE) {
-                if (!inResumeCooldown) {
-                    this.yieldState = VehicleYieldState.NORMAL_DRIVING;
-                    this.yieldEmergencyVehicleId = null;
-                }
-            } else if (!inResumeCooldown) {
-                if (this.yieldState == VehicleYieldState.NORMAL_DRIVING) {
-                    this.yieldState = VehicleYieldState.EMERGENCY_DETECTED;
-                    this.yieldStateChangedMillis = nowYield;
-                }
-
-                if (this.yieldState == VehicleYieldState.EMERGENCY_DETECTED) {
-                    this.yieldState = VehicleYieldState.EVALUATING_YIELD;
-                    this.yieldStateChangedMillis = nowYield;
-                }
-
-                if (this.yieldState == VehicleYieldState.EVALUATING_YIELD) {
-                    if (p.isYieldSafe()) {
-                        if (p.getLaneIndex() == 1) {
-                            this.desiredLane = 0;
-                            this.yieldState = VehicleYieldState.YIELDING_RIGHT;
-                            this.yieldStateChangedMillis = nowYield;
-                            emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.AGREE,
-                                    "YIELD_IN_PROGRESS: vehicle=" + getLocalName() + "; targetLane=0; missionId=" + p.getEmergencyMissionId());
-                        } else if (p.getEmergencyDistanceBehind() <= 130.0) {
-                            this.desiredLane = 0;
-                            this.yieldState = VehicleYieldState.YIELDING_STOPPED;
-                            this.yieldStateChangedMillis = nowYield;
-                            emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.INFORM,
-                                    "YIELD_COMPLETED: vehicle=" + getLocalName() + "; freedLane=1; missionId=" + p.getEmergencyMissionId());
-                        } else {
-                            // Emergência ainda longe na faixa 1: continuar a circular na faixa 0 para não gerar fila prematura
-                            this.desiredLane = 0;
-                            this.yieldState = VehicleYieldState.NORMAL_DRIVING;
-                        }
-                    } else {
-                        this.yieldState = VehicleYieldState.YIELD_NOT_SAFE;
-                        this.yieldStateChangedMillis = nowYield;
-                        emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.REFUSE,
-                                "YIELD_UNSAFE: vehicle=" + getLocalName() + "; reason=RIGHT_LANE_OCCUPIED; missionId=" + p.getEmergencyMissionId());
-                    }
-                } else if (this.yieldState == VehicleYieldState.YIELDING_RIGHT) {
-                    this.desiredLane = 0;
-                    if (p.getLaneIndex() == 0) {
-                        this.yieldState = VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE;
-                        this.yieldStateChangedMillis = nowYield;
-                        emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.INFORM,
-                                "YIELD_COMPLETED: vehicle=" + getLocalName() + "; freedLane=1; missionId=" + p.getEmergencyMissionId());
-                    } else if (!p.isYieldSafe() && (nowYield - this.yieldStateChangedMillis > 1500L)) {
-                        // Se a faixa direita ficou obstruída durante o desvio, evitar bloqueio prolongado
-                        this.yieldState = VehicleYieldState.YIELD_NOT_SAFE;
-                        this.yieldStateChangedMillis = nowYield;
-                    }
-                } else if (this.yieldState == VehicleYieldState.YIELDING_STOPPED
-                        || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
-                    this.desiredLane = 0;
-                    // Proteção anti-engarrafamento: se o semáforo está verde (ou via desimpedida) e a emergência
-                    // não ultrapassou dentro de MAX_YIELD_STOP_DURATION_MS (ex: retida atrás de tráfego na faixa 1),
-                    // retomar marcha para libertar espaço e permitir que a faixa adjacente escoe!
-                    boolean waitTimedOut = (nowYield - this.yieldStateChangedMillis >= MAX_YIELD_STOP_DURATION_MS);
-                    boolean emergencyTooFar = (p.getEmergencyDistanceBehind() > 140.0);
-                    if (waitTimedOut || emergencyTooFar) {
-                        this.yieldState = VehicleYieldState.RESUMING_ROUTE;
-                        this.yieldStateChangedMillis = nowYield;
-                        this.yieldCooldownUntilMillis = nowYield + YIELD_RESUME_COOLDOWN_MS;
-                    }
-                } else if (this.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
-                    if (p.isYieldSafe()) {
-                        this.yieldState = VehicleYieldState.EVALUATING_YIELD;
-                        this.yieldStateChangedMillis = nowYield;
-                    }
-                }
+            // Veículos normais circulam em ambas as faixas:
+            // TURN_RIGHT -> faixa 0, TURN_LEFT -> faixa 1, GO_STRAIGHT -> mantém a faixa atual (distribuição natural 0 e 1)
+            if (this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) {
+                this.desiredLane = 0;
+            } else if (this.plannedIntent == CitySimulationGUI.ManeuverIntent.TURN_LEFT) {
+                this.desiredLane = 1;
+            } else {
+                this.desiredLane = p.getLaneIndex();
             }
         } else {
-            if (this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE
+            this.plannedIntent = CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
+            this.desiredLane = p.getLaneIndex();
+        }
+
+        // 2.5 RACIOCÍNIO — COOPERAÇÃO E ABERTURA DO CORREDOR DE EMERGÊNCIA CENTRAL (Código da Estrada PT)
+        long nowYield = System.currentTimeMillis();
+        NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
+        this.desiredLateralOffsetPx = 0.0;
+
+        if (p.hasApproachingEmergency() && p.isApproachingFromBehind()
+                && p.getEmergencyDistanceBehind() <= CORRIDOR_DETECTION_DISTANCE_PX) {
+            this.yieldEmergencyVehicleId = p.getEmergencyVehicleId();
+            // Mantém o veículo na sua faixa original (0 ou 1) aplicando desvio lateral para fora do eixo central:
+            // - Faixa esquerda (1): encosta à esquerda (junto à linha dupla amarela, sem invadir sentido contrário)
+            // - Faixa direita (0): encosta à direita (junto à berma exterior, dentro dos 96px da estrada)
+            this.desiredLane = p.getLaneIndex();
+            this.desiredLateralOffsetPx = topo.getYieldLateralOffsetPx(p.getDirection(), p.getLaneIndex());
+
+            if (this.yieldState != VehicleYieldState.YIELDING_EMERGENCY) {
+                this.yieldState = VehicleYieldState.YIELDING_EMERGENCY;
+                this.yieldStateChangedMillis = nowYield;
+                emitirYieldFipaReply(p.getEmergencyVehicleId(), ACLMessage.AGREE,
+                        "YIELD_IN_PROGRESS: vehicle=" + getLocalName()
+                                + "; corridorMode=CENTRAL; lane=" + p.getLaneIndex()
+                                + "; offsetPx=" + this.desiredLateralOffsetPx
+                                + "; missionId=" + p.getEmergencyMissionId());
+            }
+        } else {
+            if (this.yieldState == VehicleYieldState.YIELDING_EMERGENCY
+                    || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE
                     || this.yieldState == VehicleYieldState.YIELDING_STOPPED
                     || this.yieldState == VehicleYieldState.YIELDING_RIGHT) {
                 this.yieldState = VehicleYieldState.RESUMING_ROUTE;
                 this.yieldStateChangedMillis = nowYield;
             } else if (this.yieldState == VehicleYieldState.RESUMING_ROUTE) {
-                if (p.getCurrentSpeed() > 1.0 || (nowYield - this.yieldStateChangedMillis > 2000L)) {
+                if (p.getCurrentSpeed() > 0.8 || (nowYield - this.yieldStateChangedMillis > 1200L)) {
                     this.yieldState = VehicleYieldState.NORMAL_DRIVING;
                     this.yieldEmergencyVehicleId = null;
                 }
@@ -411,15 +358,45 @@ public class VehicleAgent extends Agent {
         VehicleAction action;
         // Velocidade máxima adaptada à velocidade segura do piso e meteorologia
         double effectiveMaxSpeed = p.getMaxSpeed() * p.getSpeedMultiplier() * safeSpeedFactor;
+        // Em YIELDING_EMERGENCY:
+        // - Junto à linha de paragem com emergência próxima atrás: aguarda encostado para não cruzar o corredor central à frente dela
+        // - No meio do segmento: abranda suavemente para facilitar ultrapassagem limpa pelo corredor central
+        boolean holdAtStopLineForEmergency = (this.yieldState == VehicleYieldState.YIELDING_EMERGENCY)
+                && p.getDistanceToStopLine() >= 0.0 && p.getDistanceToStopLine() <= 24.0
+                && p.getEmergencyDistanceBehind() <= 200.0;
+        if (this.yieldState == VehicleYieldState.YIELDING_EMERGENCY && !shouldBrake && !holdAtStopLineForEmergency) {
+            double distEm = p.getEmergencyDistanceBehind();
+            effectiveMaxSpeed *= (distEm >= 0.0 && distEm <= 140.0) ? 0.50 : 0.72;
+        }
         this.lastCycleFipaRequested = false;
 
-        if (this.yieldState == VehicleYieldState.YIELDING_STOPPED || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
+        if (holdAtStopLineForEmergency) {
+            action = VehicleAction.STOP;
+            this.targetSpeed = 0.0;
+            this.drivingState = "CORRIDOR_HOLD_AT_STOP_LINE";
+        } else if (this.yieldState == VehicleYieldState.YIELDING_STOPPED || this.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
             action = VehicleAction.STOP;
             this.targetSpeed = 0.0;
             this.drivingState = "YIELD_WAITING_EMERGENCY_PASSAGE";
         } else if (this.yieldState == VehicleYieldState.YIELDING_RIGHT) {
-            action = VehicleAction.BRAKE;
-            this.targetSpeed = Math.min(effectiveMaxSpeed * 0.5, 1.4 * safeSpeedFactor);
+            // Mantém velocidade fluida ao deslizar para a faixa direita (0), evitando abrandar à frente da emergência
+            if (shouldBrake) {
+                double safetyMarginPx = 32.0 * safeDistanceFactor;
+                double limitDist = leaderObstacle
+                        ? (brakeForSignal ? Math.min(p.getDistanceToLeadingVehicle() - safetyMarginPx, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - safetyMarginPx))
+                        : p.getDistanceToStopLine();
+                if (limitDist <= (3.0 * safeDistanceFactor)) {
+                    action = VehicleAction.STOP;
+                    this.targetSpeed = 0.0;
+                } else {
+                    action = VehicleAction.BRAKE;
+                    double decel = 0.09 / safeDistanceFactor;
+                    this.targetSpeed = Math.max(0.30, Math.min(effectiveMaxSpeed, Math.sqrt(2.0 * decel * limitDist)));
+                }
+            } else {
+                action = VehicleAction.CRUISE;
+                this.targetSpeed = Math.min(effectiveMaxSpeed * 0.92, 2.2 * safeSpeedFactor);
+            }
             this.drivingState = "YIELDING_RIGHT_LANE_CHANGE";
         } else if (shouldBrake) {
             double safetyMarginPx = 32.0 * safeDistanceFactor;
@@ -495,7 +472,9 @@ public class VehicleAgent extends Agent {
                 explanation,
                 this.lastCycleFipaRequested,
                 this.yieldState,
-                this.yieldEmergencyVehicleId
+                this.yieldEmergencyVehicleId,
+                this.desiredLateralOffsetPx,
+                false
         );
 
         this.lastDecision = decision;
@@ -769,7 +748,11 @@ public class VehicleAgent extends Agent {
         }
 
         this.plannedIntent = requestedIntent;
-        this.desiredLane = (requestedIntent == CitySimulationGUI.ManeuverIntent.TURN_LEFT) ? 1 : 0;
+        if (requestedIntent == CitySimulationGUI.ManeuverIntent.TURN_RIGHT) {
+            this.desiredLane = 0;
+        } else if (requestedIntent == CitySimulationGUI.ManeuverIntent.TURN_LEFT) {
+            this.desiredLane = 1;
+        }
         this.activeRoute = new AStarPathfinder.RouteResult(
                 "A*-ManeuverOverride", true, approachingIdx, this.destinationNode,
                 totalCost, fullNodes, fullSegments, fullManeuvers, 1, graph.getGraphVersion());

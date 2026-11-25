@@ -69,6 +69,8 @@ public class CitySimulationGUI {
         public int urgencyLevel = 3;
         public boolean activeMission = true;
         public boolean yieldRecorded = false;
+        public double currentLateralOffsetPx = 0.0;
+        public boolean usingCentralCorridor = false;
 
         // Estado de Navegação A* (Fase 6.1 — R7, R8)
         public int originIntersectionId = 0;
@@ -77,6 +79,11 @@ public class CitySimulationGUI {
         public long routeGraphVersion = -1L;
         public int completedRoutesCount = 0;
         public int routeRecalculationsCount = 0;
+
+        // Ciclo de vida de saída e reentrada no mapa para viaturas de emergência (Opção 1)
+        public volatile boolean exitingMap = false;
+        public volatile boolean offMapStandby = false;
+        public volatile long offMapReentryAtMillis = 0L;
 
         // Métricas individuais de telemetria e espera (Feature 8)
         public long totalWaitMillis = 0;
@@ -159,7 +166,7 @@ public class CitySimulationGUI {
     private static final double VISUAL_HALF_LENGTH = (NetworkTopologyConfig.VEHICLE_LENGTH_PX / 2.0) + 0.5;   // 13.5 px (carroçaria + contorno)
     private static final double VISUAL_HALF_WIDTH = (NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0) + 0.5;     // 7.5 px (carroçaria + contorno)
     private static final double COLLISION_HALF_LENGTH = (NetworkTopologyConfig.VEHICLE_LENGTH_PX / 2.0) + 2.0; // 15.0 px
-    private static final double COLLISION_HALF_WIDTH = (NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0) + 1.5;   // 8.5 px
+    private static final double COLLISION_HALF_WIDTH = (NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0) + 0.75;  // 7.75 px (> 7.5 visual; 2*7.75=15.5 < 17.0 corredor central!)
     private static final double COLLISION_BROAD_RADIUS_SQ = 36.0 * 36.0;
 
     // Métricas de HUD em tempo real (volatile para visibilidade cross-thread entre EDT, Main e Agentes JADE)
@@ -1152,17 +1159,17 @@ public class CitySimulationGUI {
         boolean foundSafeSpot = false;
 
         int totalDirections = 4;
+        int maxLaneAttempts = isEmergency ? 1 : 2;
+        // Prioritárias nascem exclusivamente na faixa esquerda (1);
+        // veículos normais distribuem-se de forma equilibrada por ambas as faixas (0 e 1)
         for (int dOffset = 0; dOffset < totalDirections && !foundSafeSpot; dOffset++) {
             int dir = (preferredDirection + dOffset) % 4;
             int numCorridors = (dir == 0 || dir == 1) ? cols : rows;
 
             for (int cOffset = 0; cOffset < numCorridors && !foundSafeSpot; cOffset++) {
                 int corridor = ((slotIndex / 2) + cOffset) % numCorridors;
-                int maxLaneAttempts = isEmergency ? 1 : 2;
                 for (int lOffset = 0; lOffset < maxLaneAttempts && !foundSafeSpot; lOffset++) {
-                    // Prioritárias circulam exclusivamente na faixa interior/esquerda (1);
-                    // veículos normais preferem primeiro a faixa exterior/direita (0) mantendo a faixa 1 desimpedida
-                    int lane = isEmergency ? 1 : ((lOffset == 0) ? 0 : 1);
+                    int lane = isEmergency ? 1 : ((slotIndex + lOffset) % 2);
                     double laneCoord = top.getLaneCenterCoordinate(corridor, dir, lane);
 
                     double[] candidateLongitudinal = buildSafeLongitudinalCandidates(top, dir);
@@ -1224,14 +1231,11 @@ public class CitySimulationGUI {
         int destIntersection = selectNextDestination(firstIntersection, v.direction, slotIndex);
         assignAStarRoute(v, firstIntersection, destIntersection);
 
-        if (isEmergency) {
-            // Viaturas de emergência mantêm corredor prioritário em frente na faixa da esquerda (1)
-            v.intent = ManeuverIntent.GO_STRAIGHT;
-        }
-
         // Ajusta a faixa inicial: emergências sempre na faixa esquerda (1);
-        // veículos normais seguem a regra de trânsito (faixa 0 para em frente/direita, faixa 1 só para esquerda)
-        int desiredLane = isEmergency ? 1 : ((v.intent == ManeuverIntent.TURN_LEFT) ? 1 : 0);
+        // veículos normais usam ambas as faixas (0 para virar à direita, 1 para virar à esquerda, mantendo a faixa em frente)
+        int desiredLane = isEmergency ? 1
+                : (v.intent == ManeuverIntent.TURN_RIGHT ? 0
+                : (v.intent == ManeuverIntent.TURN_LEFT ? 1 : v.laneIndex));
         if (desiredLane != v.laneIndex) {
             int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
             double altCoord = top.getLaneCenterCoordinate(corridor, v.direction, desiredLane);
@@ -1303,6 +1307,7 @@ public class CitySimulationGUI {
 
     public synchronized boolean isSpawnPositionClear(double x, double y, double minDistancePx) {
         for (VisualVehicle other : vehicles) {
+            if (other.offMapStandby) continue;
             if (Math.hypot(other.x - x, other.y - y) < minDistancePx) {
                 return false;
             }
@@ -1896,6 +1901,7 @@ public class CitySimulationGUI {
         VisualVehicle best = null;
         double bestDistSq = minDistanceSq;
         for (VisualVehicle v : vehicles) {
+            if (v.offMapStandby) continue;
             double dx = v.x - worldX;
             double dy = v.y - worldY;
             double distSq = dx * dx + dy * dy;
@@ -1957,7 +1963,15 @@ public class CitySimulationGUI {
         Runnable uiUpdater = () -> {
             if (v != null) {
                 String cat = v.category;
-                String status = v.inIntersection ? "No Cruzamento (A virar)" : (v.currentSpeed < 0.2 ? "Travado / Espera" : "Em Movimento");
+                String status;
+                if (v.offMapStandby) {
+                    long remSec = Math.max(0L, (v.offMapReentryAtMillis - System.currentTimeMillis() + 999L) / 1000L);
+                    status = "Fora do Mapa (Nova ocorrência em ~" + remSec + "s)";
+                } else if (v.isEmergency && v.exitingMap) {
+                    status = "A sair do mapa (Fim de missão)";
+                } else {
+                    status = v.inIntersection ? "No Cruzamento (A virar)" : (v.currentSpeed < 0.2 ? "Travado / Espera" : "Em Movimento");
+                }
                 String speedStr = String.format(Locale.ROOT, "%.1f km/h", v.currentSpeed * 10.0);
                 String laneStr = (v.laneIndex == 0) ? "Exterior (Direita)" : "Interior (Esquerda)";
                 String origStr = "C" + (v.originIntersectionId + 1);
@@ -2509,7 +2523,7 @@ public class CitySimulationGUI {
     public int getApproachingCount(int interIdx, int axis) {
         int count = 0;
         for (VisualVehicle v : vehicles) {
-            if (v.inIntersection) continue;
+            if (v.offMapStandby || v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
             double dist = getDistanceToTargetStopLine(v);
@@ -2523,7 +2537,7 @@ public class CitySimulationGUI {
     public int getWaitingCount(int interIdx, int axis) {
         int count = 0;
         for (VisualVehicle v : vehicles) {
-            if (v.inIntersection || v.currentSpeed >= 0.2) continue;
+            if (v.offMapStandby || v.inIntersection || v.currentSpeed >= 0.2) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
             double dist = getDistanceToTargetStopLine(v);
@@ -2538,7 +2552,7 @@ public class CitySimulationGUI {
         NetworkTopologyConfig top = this.topology;
         int n = waitNS.length;
         for (VisualVehicle v : vehicles) {
-            if (v.inIntersection || v.currentSpeed >= 0.2) continue;
+            if (v.offMapStandby || v.inIntersection || v.currentSpeed >= 0.2) continue;
             double dist = top.getBumperDistanceToTargetStopLine(v.x, v.y, v.direction);
             if (dist < 0.0 || dist > 220.0) continue;
             int idx = top.getTargetIntersection(v.x, v.y, v.direction);
@@ -2551,7 +2565,7 @@ public class CitySimulationGUI {
 
     public boolean hasEmergencyApproaching(int interIdx, int axis) {
         for (VisualVehicle v : vehicles) {
-            if (!v.isEmergency || !v.activeMission || v.inIntersection) continue;
+            if (v.offMapStandby || !v.isEmergency || !v.activeMission || v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
             double dist = getDistanceToTargetStopLine(v);
@@ -2631,7 +2645,7 @@ public class CitySimulationGUI {
         int volume = 0;
         double sumSpeed = 0.0;
         for (VisualVehicle v : vehicles) {
-            if (v.inIntersection) continue;
+            if (v.offMapStandby || v.inIntersection) continue;
             double dist = getDistanceToTargetStopLine(v);
             if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0) {
                 volume++;
@@ -2646,7 +2660,7 @@ public class CitySimulationGUI {
         double sumWait = 0.0;
         long now = System.currentTimeMillis();
         for (VisualVehicle v : vehicles) {
-            if (v.inIntersection) continue;
+            if (v.offMapStandby || v.inIntersection) continue;
             double dist = getDistanceToTargetStopLine(v);
             if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0 && v.currentSpeed < 0.2) {
                 queue++;
@@ -2725,6 +2739,14 @@ public class CitySimulationGUI {
         int interCount = top.getIntersectionCount();
 
         for (VisualVehicle v : vehicles) {
+            // 0. Viaturas de emergência em espera fora do mapa (após conclusão de missão) aguardam reentrada numa nova ocorrência
+            if (v.offMapStandby) {
+                if (v.isEmergency && System.currentTimeMillis() >= v.offMapReentryAtMillis) {
+                    reenterEmergencyFromBorder(v, top);
+                }
+                continue;
+            }
+
             // 1. Tratamento de Manobra Curva Ativa no Interior do Cruzamento
             if (v.inIntersection) {
                 updateIntersectionManeuver(v);
@@ -2744,7 +2766,11 @@ public class CitySimulationGUI {
 
                 if (v.intent == ManeuverIntent.TURN_RIGHT || v.intent == ManeuverIntent.TURN_LEFT) {
                     double distToEntry = top.getDistanceToIntersectionStopLine(ix, v.x, v.y, v.direction);
-                    if (distToEntry <= 3.5) {
+                    // Emergências no corredor central ou carros na faixa 1 a virar à direita avançam totalmente
+                    // para dentro da caixa (<= -8px) antes de curvar, evitando que a traseira bloqueie carros na stop line
+                    double turnTriggerDist = ((v.isEmergency && v.usingCentralCorridor)
+                            || (v.intent == ManeuverIntent.TURN_RIGHT && v.laneIndex == 1)) ? -8.0 : 3.5;
+                    if (distToEntry <= turnTriggerDist) {
                         v.crossingIntersection = -1;
                         initiateIntersectionTurn(v, ix);
                         continue;
@@ -2796,11 +2822,13 @@ public class CitySimulationGUI {
             VisualVehicle leaderObj = null;
             double distToLeader = 9999.0;
             for (VisualVehicle other : vehicles) {
-                if (other == v || other.direction != v.direction) continue;
+                if (other == v || other.offMapStandby || other.direction != v.direction) continue;
+                // Banda lateral de deteção de líder (14.5px ≈ largura real de 14px):
+                // permite à emergência no eixo central (24px) ultrapassar carros encostados a 7px e 41px (distância lateral = 17px)
                 if (v.direction == 0 || v.direction == 1) {
-                    if (Math.abs(other.x - v.x) > 17.5) continue;
+                    if (Math.abs(other.x - v.x) > 14.5) continue;
                 } else {
-                    if (Math.abs(other.y - v.y) > 17.5) continue;
+                    if (Math.abs(other.y - v.y) > 14.5) continue;
                 }
                 double d = 9999.0;
                 switch (v.direction) {
@@ -2864,9 +2892,9 @@ public class CitySimulationGUI {
                     v.yieldState = decision.getYieldState();
                     v.yieldingToEmergencyId = decision.getYieldTargetVehicleId();
 
-                    // Gestão da cedência física, mudança de faixa segura e centragem rigorosa na via
+                    // Gestão do Corredor de Emergência Central, cedência física, mudança de faixa e centragem
                     int targetDesiredLane = v.isEmergency ? 1 : decision.getDesiredLane();
-                    manageVehicleLanePositioning(v, top, targetDesiredLane, distToStopLine);
+                    manageVehicleLanePositioning(v, top, targetDesiredLane, distToStopLine, decision);
 
                     if (decision.getAction() == VehicleAction.STOP) {
                         v.isBraking = true;
@@ -2900,14 +2928,18 @@ public class CitySimulationGUI {
                             v.totalWaitMillis += (System.currentTimeMillis() - v.currentStopStartMillis);
                             v.currentStopStartMillis = 0;
                         }
-                        double targetSpeed = Math.min(decision.getTargetSpeed(), v.maxSpeed * globalSpeedMultiplier);
-                        if (v.wasStopped && !v.isEmergency) {
-                            if (v.startDelayTicks < 10) {
+                        double speedCap = (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE && v.laneIndex == 1)
+                                ? (v.maxSpeed * 1.12 * globalSpeedMultiplier)
+                                : (v.maxSpeed * globalSpeedMultiplier);
+                        double targetSpeed = Math.min(decision.getTargetSpeed(), speedCap);
+                        boolean urgentLaunch = v.isEmergency || (emergInfo.detected && v.laneIndex == 1);
+                        if (v.wasStopped && !urgentLaunch) {
+                            if (v.startDelayTicks < 3) {
                                 v.startDelayTicks++;
                                 v.currentSpeed = 0.0;
                             } else {
-                                v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.08);
-                                if (v.currentSpeed >= targetSpeed * 0.8) {
+                                v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.10);
+                                if (v.currentSpeed >= targetSpeed * 0.65) {
                                     v.wasStopped = false;
                                     v.startDelayTicks = 0;
                                 }
@@ -2915,7 +2947,7 @@ public class CitySimulationGUI {
                         } else {
                             v.wasStopped = false;
                             v.startDelayTicks = 0;
-                            double accel = v.isEmergency ? 0.14 : 0.06;
+                            double accel = v.isEmergency ? 0.14 : (urgentLaunch ? 0.12 : 0.08);
                             v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + accel);
                         }
                     }
@@ -2932,7 +2964,9 @@ public class CitySimulationGUI {
                 if (distToStopLine > 0.0 && distToStopLine <= 240.0 && nextIntersectionIdx >= 0) {
                     ensureValidAStarIntentForApproach(v, nextIntersectionIdx);
                 }
-                int fallbackDesiredLane = v.isEmergency ? 1 : ((v.intent == ManeuverIntent.TURN_LEFT) ? 1 : 0);
+                int fallbackDesiredLane = v.isEmergency ? 1
+                        : (v.intent == ManeuverIntent.TURN_RIGHT ? 0
+                        : (v.intent == ManeuverIntent.TURN_LEFT ? 1 : v.laneIndex));
                 manageVehicleLanePositioning(v, top, fallbackDesiredLane, distToStopLine);
                 boolean shouldBrakeForSignal = approachingStopLine && signalNotGreen;
                 boolean shouldBrake = blockedByLeader || shouldBrakeForSignal;
@@ -2969,12 +3003,12 @@ public class CitySimulationGUI {
                     }
                     double effectiveMaxSpeed = v.maxSpeed * globalSpeedMultiplier;
                     if (v.wasStopped && !v.isEmergency) {
-                        if (v.startDelayTicks < 10) {
+                        if (v.startDelayTicks < 3) {
                             v.startDelayTicks++;
                             v.currentSpeed = 0.0;
                         } else {
-                            v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.08);
-                            if (v.currentSpeed >= effectiveMaxSpeed * 0.8) {
+                            v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.10);
+                            if (v.currentSpeed >= effectiveMaxSpeed * 0.65) {
                                 v.wasStopped = false;
                                 v.startDelayTicks = 0;
                             }
@@ -2982,17 +3016,21 @@ public class CitySimulationGUI {
                     } else {
                         v.wasStopped = false;
                         v.startDelayTicks = 0;
-                        double accel = v.isEmergency ? 0.14 : 0.06;
+                        double accel = v.isEmergency ? 0.14 : 0.08;
                         v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + accel);
                     }
                 }
             }
 
-            // 6. Invariante Físico de Segurança Absoluta (Anti-Colisão e Paragem no Vermelho antes da Stop Line)
-            if (blockedByLeader || (approachingStopLine && signalNotGreen)) {
+            // 6. Invariante Físico de Segurança Absoluta (Anti-Colisão e Prioridade de Emergência Opção A)
+            boolean emergencySafeRedPriority = v.isEmergency && v.activeMission
+                    && nextIntersectionIdx >= 0
+                    && isIntersectionSafeForEmergencyCross(nextIntersectionIdx, axis);
+            boolean mustStopForSignal = approachingStopLine && signalNotGreen && !emergencySafeRedPriority;
+            if (blockedByLeader || mustStopForSignal) {
                 double safeStopDist = Math.max(0.0, distToStopLine);
                 double limitDist = blockedByLeader
-                        ? ((approachingStopLine && signalNotGreen) ? Math.min(distToLeader - 32.0, safeStopDist) : (distToLeader - 32.0))
+                        ? (mustStopForSignal ? Math.min(distToLeader - 32.0, safeStopDist) : (distToLeader - 32.0))
                         : safeStopDist;
                 if (limitDist <= 3.0) {
                     v.currentSpeed = 0.0;
@@ -3006,13 +3044,17 @@ public class CitySimulationGUI {
                 }
             }
 
-            // 8. Início de Travessia ou Curva ao Atingir a Stop Line (para-choques dianteiro) em Sinal VERDE
-            if (centerDistToStopLine >= -1.0 && distToStopLine <= 4.0 && nextLight == LightState.GREEN && !blockedByLeader) {
+            // 8. Início de Travessia ou Curva ao Atingir a Stop Line em Sinal VERDE (ou Emergência em Missão com Cruzamento Livre)
+            if (centerDistToStopLine >= -1.0 && distToStopLine <= 4.0
+                    && (nextLight == LightState.GREEN || emergencySafeRedPriority)
+                    && !blockedByLeader) {
                 if (!isIntersectionExitBlocked(v, nextIntersectionIdx, top)
                         && !hasConflictingVehicleInIntersection(v, nextIntersectionIdx)) {
                     v.crossingIntersection = nextIntersectionIdx;
+                    double turnEntryTrigger = ((v.isEmergency && v.usingCentralCorridor)
+                            || (v.intent == ManeuverIntent.TURN_RIGHT && v.laneIndex == 1)) ? -8.0 : 3.5;
                     if ((v.intent == ManeuverIntent.TURN_RIGHT || v.intent == ManeuverIntent.TURN_LEFT)
-                            && centerDistToStopLine <= 3.5) {
+                            && centerDistToStopLine <= turnEntryTrigger) {
                         v.crossingIntersection = -1;
                         initiateIntersectionTurn(v, nextIntersectionIdx);
                         continue;
@@ -3025,9 +3067,9 @@ public class CitySimulationGUI {
                 }
             }
 
-            // 9. Proteção física absoluta da Stop Line: nunca permite que a frente do veículo transponha a linha se o sinal não estiver VERDE
+            // 9. Proteção física absoluta da Stop Line: nunca permite transpor em vermelho (exceto emergência verificada segura)
             double stepDist = v.currentSpeed;
-            if (approachingStopLine && signalNotGreen && (distToStopLine - stepDist) < 1.0) {
+            if (mustStopForSignal && (distToStopLine - stepDist) < 1.0) {
                 stepDist = Math.max(0.0, distToStopLine - 1.0);
                 v.currentSpeed = 0.0;
                 v.isBraking = true;
@@ -3072,7 +3114,7 @@ public class CitySimulationGUI {
             v.headingAngle = candAngle;
 
             double newDist = top.getBumperDistanceToTargetStopLine(v.x, v.y, v.direction);
-            if (oldDist > 0.5 && newDist < -0.5 && nextLight == LightState.RED && v.crossingIntersection < 0 && !v.inIntersection) {
+            if (!v.isEmergency && oldDist > 0.5 && newDist < -0.5 && nextLight == LightState.RED && v.crossingIntersection < 0 && !v.inIntersection) {
                 redLightViolationsCount.incrementAndGet();
             }
 
@@ -3081,9 +3123,27 @@ public class CitySimulationGUI {
         }
     }
 
+    public void setEmergencyExitingMap(String vehicleId, boolean exiting) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        if (v != null && v.isEmergency) {
+            v.exitingMap = exiting;
+        }
+    }
+
+    public void syncEmergencyVisualRoute(String vehicleId, int originNode, int destNode, AStarPathfinder.RouteResult route) {
+        VisualVehicle v = getVisualVehicle(vehicleId);
+        if (v == null) return;
+        v.originIntersectionId = originNode;
+        v.destinationIntersectionId = destNode;
+        v.activeRoute = route;
+        if (route != null) {
+            v.routeGraphVersion = route.graphVersion;
+            v.routeRecalculationsCount++;
+        }
+    }
+
     private void ensureValidAStarIntentForApproach(VisualVehicle v, int approachingIntersectionIdx) {
-        if (v.isEmergency && v.activeMission) {
-            v.intent = ManeuverIntent.GO_STRAIGHT;
+        if (v.isEmergency && v.exitingMap) {
             return;
         }
         long currentGraphVer = roadGraph.getGraphVersion();
@@ -3112,7 +3172,7 @@ public class CitySimulationGUI {
     }
 
     private void onVehicleExitedIntersection(VisualVehicle v, int exitedIntersectionIdx) {
-        if (v.isEmergency && v.activeMission) {
+        if (v.isEmergency && v.exitingMap) {
             v.intent = ManeuverIntent.GO_STRAIGHT;
             return;
         }
@@ -3153,32 +3213,48 @@ public class CitySimulationGUI {
         double minRearDist = Double.MAX_VALUE;
 
         for (VisualVehicle other : vehicles) {
-            if (!other.isEmergency || !other.activeMission) continue;
-            if (other.direction != v.direction) continue;
+            if (other.offMapStandby || !other.isEmergency || !other.activeMission) continue;
 
-            int otherCorridor = (other.direction == 0 || other.direction == 1) ? top.getClosestCol(other.x) : top.getClosestRow(other.y);
-            if (otherCorridor != corridor) continue;
+            double refX = other.x;
+            double refY = other.y;
+            double extraTurnDist = 0.0;
+            int effectiveEmDir = other.direction;
 
-            // Determinar se 'other' está ATRÁS de 'v'
-            double rearDist = -1.0;
-            switch (v.direction) {
-                case 0: // N->S (Y cresce)
-                    if (other.y < v.y) rearDist = v.y - other.y;
-                    break;
-                case 1: // S->N (Y decresce)
-                    if (other.y > v.y) rearDist = other.y - v.y;
-                    break;
-                case 2: // W->E (X cresce)
-                    if (other.x < v.x) rearDist = v.x - other.x;
-                    break;
-                case 3: // E->W (X decresce)
-                    if (other.x > v.x) rearDist = other.x - v.x;
-                    break;
+            if (other.inIntersection) {
+                // Antecipa a direção e corredor de saída da emergência ainda durante a curva,
+                // permitindo que os carros na via de destino comecem logo a ceder espaço!
+                if (Math.abs(other.turnTargetAngle - 0.0) < 0.1) effectiveEmDir = 2;
+                else if (Math.abs(other.turnTargetAngle - Math.PI / 2.0) < 0.1) effectiveEmDir = 0;
+                else if (Math.abs(other.turnTargetAngle - Math.PI) < 0.1 || Math.abs(other.turnTargetAngle + Math.PI) < 0.1) effectiveEmDir = 3;
+                else if (Math.abs(other.turnTargetAngle + Math.PI / 2.0) < 0.1) effectiveEmDir = 1;
+                refX = other.turnEndX;
+                refY = other.turnEndY;
+                extraTurnDist = Math.max(0.0, (1.0 - other.turnProgress) * 45.0);
             }
 
-            if (rearDist > 0.0 && rearDist <= 300.0) { // Alcance alargado para cedência antecipada do corredor esquerdo
-                if (rearDist < minRearDist) {
-                    minRearDist = rearDist;
+            if (effectiveEmDir != v.direction) continue;
+
+            int otherCorridor = (effectiveEmDir == 0 || effectiveEmDir == 1) ? top.getClosestCol(refX) : top.getClosestRow(refY);
+            if (otherCorridor != corridor) continue;
+
+            // Determinar posição longitudinal relativa de 'other' face a 'v':
+            // rearDist > 0 => emergência ATRÁS de 'v'; rearDist < 0 => emergência já ULTRAPASSOU 'v'
+            double rearDist = 9999.0;
+            switch (v.direction) {
+                case 0: rearDist = (v.y - refY) + extraTurnDist; break;
+                case 1: rearDist = (refY - v.y) + extraTurnDist; break;
+                case 2: rearDist = (v.x - refX) + extraTurnDist; break;
+                case 3: rearDist = (refX - v.x) + extraTurnDist; break;
+            }
+
+            // Mantém o corredor aberto enquanto a emergência está atrás (até 280px) OU acabou de ultrapassar
+            // com margem de segurança de 45px à frente de um carro que já estava em YIELDING_EMERGENCY
+            boolean inBehindRange = (rearDist > 0.0 && rearDist <= 280.0);
+            boolean inPassClearanceMargin = (v.yieldState == VehicleYieldState.YIELDING_EMERGENCY && rearDist <= 0.0 && rearDist >= -45.0);
+            if (inBehindRange || inPassClearanceMargin) {
+                double effectiveDist = Math.max(0.1, rearDist);
+                if (effectiveDist < minRearDist) {
+                    minRearDist = effectiveDist;
                     nearestEm = other;
                 }
             }
@@ -3193,11 +3269,15 @@ public class CitySimulationGUI {
             info.category = (nearestEm.category != null ? nearestEm.category : "AMBULANCE");
             info.missionId = (nearestEm.mission != null ? nearestEm.mission.getMissionId() : ("MIS-" + nearestEm.id));
             info.emergencySpeed = nearestEm.currentSpeed;
-            // Calcula a faixa física real da viatura prioritária a partir da sua coordenada
-            double emCoord = (nearestEm.direction == 0 || nearestEm.direction == 1) ? nearestEm.x : nearestEm.y;
-            double emLane0 = top.getLaneCenterCoordinate(corridor, nearestEm.direction, 0);
-            double emLane1 = top.getLaneCenterCoordinate(corridor, nearestEm.direction, 1);
-            info.emergencyLane = (Math.abs(emCoord - emLane0) < Math.abs(emCoord - emLane1)) ? 0 : 1;
+            // Calcula a faixa física real da viatura prioritária (ou faixa 1 garantida se estiver a concluir curva)
+            if (nearestEm.inIntersection) {
+                info.emergencyLane = 1;
+            } else {
+                double emCoord = (nearestEm.direction == 0 || nearestEm.direction == 1) ? nearestEm.x : nearestEm.y;
+                double emLane0 = top.getLaneCenterCoordinate(corridor, nearestEm.direction, 0);
+                double emLane1 = top.getLaneCenterCoordinate(corridor, nearestEm.direction, 1);
+                info.emergencyLane = (Math.abs(emCoord - emLane0) < Math.abs(emCoord - emLane1)) ? 0 : 1;
+            }
             info.relativeSpeed = Math.max(0.1, nearestEm.currentSpeed - v.currentSpeed);
             info.estimatedTimeToArrivalSeconds = (info.relativeSpeed > 0.05) ? (minRearDist / (info.relativeSpeed * 30.0)) : 9999.0;
 
@@ -3258,10 +3338,19 @@ public class CitySimulationGUI {
     private boolean isMoveBlockedByCollision(VisualVehicle self, double candX, double candY, double candAngle) {
         double moveDx = candX - self.x;
         double moveDy = candY - self.y;
+        // Em passagem pelo corredor central (emergência) ou durante desvio lateral no corredor, usa folga estrita
+        // (> VISUAL_HALF_WIDTH = 7.5px => 0 sobreposição visual) para impedir bloqueios falsos por margem excessiva
+        double effectiveHalfWid = (self.isEmergency && self.usingCentralCorridor) ? VISUAL_HALF_WIDTH : COLLISION_HALF_WIDTH;
         for (VisualVehicle other : vehicles) {
-            if (other == self) continue;
+            if (other == self || other.offMapStandby) continue;
+            // Se 'self' já está a executar curva dentro do cruzamento e 'other' está parado fora da caixa (atrás da stop line),
+            // verifica apenas contacto visual real para que um carro na stop line nunca bloqueie a saída de uma curva (anti-deadlock)
+            double checkLen = (self.inIntersection && !other.inIntersection && other.crossingIntersection < 0)
+                    ? VISUAL_HALF_LENGTH : COLLISION_HALF_LENGTH;
+            double checkWid = (self.inIntersection && !other.inIntersection && other.crossingIntersection < 0)
+                    ? VISUAL_HALF_WIDTH : effectiveHalfWid;
             if (boxesOverlap(candX, candY, candAngle, other.x, other.y, other.headingAngle,
-                    COLLISION_HALF_LENGTH, COLLISION_HALF_WIDTH)) {
+                    checkLen, checkWid)) {
                 // Nunca permitir sobreposição real da carroçaria (26x14 + contorno)
                 boolean visualOverlap = boxesOverlap(candX, candY, candAngle, other.x, other.y, other.headingAngle,
                         VISUAL_HALF_LENGTH, VISUAL_HALF_WIDTH);
@@ -3299,7 +3388,7 @@ public class CitySimulationGUI {
         double laneHalfLen = isEmergencyYield ? (COLLISION_HALF_LENGTH + 2.0) : (COLLISION_HALF_LENGTH + 7.0);
         double laneHalfWid = COLLISION_HALF_WIDTH + 0.5;  // 9.0 px
         for (VisualVehicle other : vehicles) {
-            if (other == self) continue;
+            if (other == self || other.offMapStandby) continue;
             if (boxesOverlap(targetX, targetY, baseAngle, other.x, other.y, other.headingAngle,
                     laneHalfLen, laneHalfWid)) {
                 return false;
@@ -3315,7 +3404,7 @@ public class CitySimulationGUI {
         int rw = topology.getRoadWidth();
 
         for (VisualVehicle other : vehicles) {
-            if (other == self) continue;
+            if (other == self || other.offMapStandby) continue;
             boolean otherCommittedToInter = (other.crossingIntersection == interIdx)
                     || (other.inIntersection && other.activeIntersection == interIdx);
             boolean otherInsideBox = (other.x > ix && other.x < ix + rw
@@ -3330,19 +3419,65 @@ public class CitySimulationGUI {
                 return true;
             }
 
-            // 2. Qualquer manobra de curva (TURN_LEFT ou TURN_RIGHT) já comprometida ou pretendida
-            //    no mesmo cruzamento: serializa entradas para impedir duas viaturas em curva lado-a-lado
-            //    a convergir para a mesma faixa de saída (evita deadlock mútuo em curva)
+            // 2. Conflitos no mesmo eixo dentro do cruzamento (serialização exata sem bloquear trajetórias que não se cruzam)
             boolean selfTurning = (self.intent != ManeuverIntent.GO_STRAIGHT);
             boolean otherTurning = (other.intent != ManeuverIntent.GO_STRAIGHT) || other.inIntersection;
             if (otherCommittedToInter && (selfTurning || otherTurning)) {
-                // Se self segue em frente na faixa 1 (esquerda) e other vira à direita (mesmo sentido na faixa 0
-                // ou sentido oposto), as trajetórias não se cruzam — permite fluidez contínua na faixa prioritária
+                // Trajetórias que NUNCA se cruzam no mesmo eixo:
+                // (a) self em frente na faixa 1 e other a virar à direita (mesmo sentido na faixa 0 ou sentido oposto)
                 if (!selfTurning && self.laneIndex == 1 && other.intent == ManeuverIntent.TURN_RIGHT
                         && (other.direction != self.direction || other.laneIndex == 0)) {
                     continue;
                 }
+                // (b) self a virar à direita e other no sentido OPOSTO a seguir em frente ou a virar à direita
+                //     (permanecem em metades opostas do cruzamento e nunca se intersetam)
+                if (self.intent == ManeuverIntent.TURN_RIGHT && other.direction != self.direction
+                        && other.intent != ManeuverIntent.TURN_LEFT) {
+                    continue;
+                }
+                // (c) self em frente e other no sentido OPOSTO a virar à direita (nunca cruza a faixa de self)
+                if (!selfTurning && other.direction != self.direction && other.intent == ManeuverIntent.TURN_RIGHT) {
+                    continue;
+                }
+                // (d) Escoamento fluido em fila na mesma faixa e mesma curva: permite ao carro seguinte entrar no verde
+                //     assim que o carro da frente já ultrapassou 50% da curva e está a >= 34px de distância (0 colisão)
+                if (selfTurning && other.inIntersection && other.turnProgress >= 0.50
+                        && other.direction == self.direction && other.laneIndex == self.laneIndex
+                        && other.intent == self.intent
+                        && Math.hypot(other.x - self.x, other.y - self.y) >= 34.0) {
+                    continue;
+                }
                 return true;
+            }
+        }
+
+        // 3. Prioridade de entrada no cruzamento para o Corredor de Emergência:
+        //    um veículo normal em YIELDING_EMERGENCY nunca entra no cruzamento à frente da emergência
+        //    (evita cortar a trajetória do corredor central, especialmente viragens à direita desde a faixa 1 ou esquerda desde a faixa 0)
+        if (!self.isEmergency) {
+            if (self.yieldState == VehicleYieldState.YIELDING_EMERGENCY) {
+                return true;
+            }
+            for (VisualVehicle em : vehicles) {
+                if (em == self || em.offMapStandby || !em.isEmergency || !em.activeMission) continue;
+                int emAxis = (em.direction == 0 || em.direction == 1) ? 0 : 1;
+                if (emAxis != selfAxis) continue;
+                if (topology.getTargetIntersection(em.x, em.y, em.direction) != interIdx) continue;
+                double emDist = topology.getBumperDistanceToTargetStopLine(em.x, em.y, em.direction);
+
+                if (self.intent == ManeuverIntent.TURN_LEFT && self.direction == em.direction && self.laneIndex == 0
+                        && emDist >= -4.0 && emDist <= 90.0) {
+                    return true;
+                }
+
+                if (em.intent != ManeuverIntent.GO_STRAIGHT && emDist >= -4.0 && emDist <= 10.0) {
+                    if (em.intent == ManeuverIntent.TURN_LEFT && self.direction != em.direction) {
+                        return true;
+                    }
+                    if (em.intent == ManeuverIntent.TURN_RIGHT && self.direction == em.direction && self.laneIndex == 0) {
+                        return true;
+                    }
+                }
             }
         }
         return false;
@@ -3350,12 +3485,54 @@ public class CitySimulationGUI {
 
     private void manageVehicleLanePositioning(VisualVehicle v, NetworkTopologyConfig top,
                                               int desiredLane, double distToStopLine) {
+        manageVehicleLanePositioning(v, top, desiredLane, distToStopLine, null);
+    }
+
+    private void manageVehicleLanePositioning(VisualVehicle v, NetworkTopologyConfig top,
+                                              int desiredLane, double distToStopLine, VehicleDecision decision) {
+        int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
+
+        // 1. Viatura de emergência: alinha pelo eixo central (Corredor de Emergência) quando há trânsito à frente/lado,
+        //    ou circula normalmente na faixa esquerda (1) em via livre
+        if (v.isEmergency && v.activeMission && !v.inIntersection) {
+            boolean useCorridor = (decision != null && decision.isUseCentralCorridor())
+                    || hasTrafficAheadOnCorridor(v.id, 280.0);
+            if (useCorridor) {
+                v.usingCentralCorridor = true;
+                double corridorCoord = top.getEmergencyCorridorCoordinate(corridor, v.direction);
+                performLateralShiftToCoord(v, corridorCoord, 1.35);
+                updateVisualLateralOffset(v, top, corridor);
+                return;
+            } else {
+                v.usingCentralCorridor = false;
+                double lane1Coord = top.getLaneCenterCoordinate(corridor, v.direction, 1);
+                performLateralShiftToCoord(v, lane1Coord, 1.15);
+                v.laneIndex = 1;
+                updateVisualLateralOffset(v, top, corridor);
+                return;
+            }
+        }
+
+        // 2. Veículo regular em YIELDING_EMERGENCY (Corredor de Emergência PT):
+        //    faixa 0 encosta à berma direita (-5px / +5px), faixa 1 encosta ao separador central (+5px / -5px)
+        if (!v.isEmergency && v.yieldState == VehicleYieldState.YIELDING_EMERGENCY) {
+            if (!v.yieldRecorded) {
+                totalYieldsInitiated.incrementAndGet();
+                v.yieldRecorded = true;
+            }
+            double targetCoord = top.getYieldTargetCoordinate(corridor, v.direction, v.laneIndex);
+            performLateralShiftToCoord(v, targetCoord, 1.15);
+            updateVisualLateralOffset(v, top, corridor);
+            return;
+        }
+
         if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
             if (!v.yieldRecorded) {
                 totalYieldsInitiated.incrementAndGet();
                 v.yieldRecorded = true;
             }
             performSmoothLateralShift(v, top, desiredLane, true);
+            updateVisualLateralOffset(v, top, corridor);
             return;
         }
         if (v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE || v.yieldState == VehicleYieldState.YIELDING_STOPPED) {
@@ -3366,12 +3543,18 @@ public class CitySimulationGUI {
             if (v.laneIndex == 0) {
                 performSmoothLateralShift(v, top, 0, true);
             }
+            updateVisualLateralOffset(v, top, corridor);
             return;
         }
         if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
-            if (!performSmoothLateralShift(v, top, desiredLane, false)) {
-                recenterVehicleToCurrentLane(v, top);
+            if (v.yieldRecorded) {
+                totalYieldsCompleted.incrementAndGet();
+                v.yieldRecorded = false;
             }
+            // Regressa suavemente ao centro da faixa original após a passagem da emergência
+            double ownCenter = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
+            performLateralShiftToCoord(v, ownCenter, 0.95);
+            updateVisualLateralOffset(v, top, corridor);
             return;
         }
         if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
@@ -3380,25 +3563,24 @@ public class CitySimulationGUI {
                 v.yieldRecorded = true;
             }
             recenterVehicleToCurrentLane(v, top);
+            updateVisualLateralOffset(v, top, corridor);
             return;
         }
 
-        int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
         double currentCoord = (v.direction == 0 || v.direction == 1) ? v.x : v.y;
         double ownLaneCenter = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
         boolean alreadyOffCenter = Math.abs(currentCoord - ownLaneCenter) > 0.25;
 
-        if (desiredLane != v.laneIndex) {
-            // Viaturas de emergência em missão podem passar para a faixa 1 de ultrapassagem mesmo mais perto do cruzamento
-            if (v.isEmergency && v.activeMission && distToStopLine > 10.0) {
-                boolean shifted = performSmoothLateralShift(v, top, desiredLane, true);
-                if (!shifted && alreadyOffCenter) {
-                    recenterVehicleToCurrentLane(v, top);
-                }
-                return;
+        // Não muda de faixa durante aproximação de emergência no mesmo corredor (mantém o corredor central estável)
+        if (!v.isEmergency && hasActiveEmergencyOnCorridor(v, top, corridor)) {
+            if (alreadyOffCenter) {
+                recenterVehicleToCurrentLane(v, top);
             }
-            // Só inicia uma nova mudança de faixa com distância confortável antes da fila/stop line (> 85px);
-            // se já estava a meio de uma mudança iniciada (> 15px da stop line), tenta concluir ou recolhe à faixa atual.
+            updateVisualLateralOffset(v, top, corridor);
+            return;
+        }
+
+        if (desiredLane != v.laneIndex) {
             boolean canStartShift = !alreadyOffCenter && distToStopLine > 85.0 && distToStopLine < 230.0;
             boolean canFinishShift = alreadyOffCenter && distToStopLine > 15.0 && distToStopLine < 230.0;
             if (canStartShift || canFinishShift) {
@@ -3406,6 +3588,7 @@ public class CitySimulationGUI {
                 if (!shifted && alreadyOffCenter) {
                     recenterVehicleToCurrentLane(v, top);
                 }
+                updateVisualLateralOffset(v, top, corridor);
                 return;
             }
         }
@@ -3414,6 +3597,162 @@ public class CitySimulationGUI {
         if (alreadyOffCenter) {
             recenterVehicleToCurrentLane(v, top);
         }
+        updateVisualLateralOffset(v, top, corridor);
+    }
+
+    private void updateVisualLateralOffset(VisualVehicle v, NetworkTopologyConfig top, int corridor) {
+        double ownCenter = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
+        double cur = (v.direction == 0 || v.direction == 1) ? v.x : v.y;
+        v.currentLateralOffsetPx = cur - ownCenter;
+    }
+
+    /**
+     * Indica se existe tráfego regular à frente (ou em ultrapassagem lateral) no corredor da viatura de emergência,
+     * acionando o alinhamento pelo eixo central do Corredor de Emergência.
+     */
+    public boolean hasTrafficAheadOnCorridor(String emergencyId, double rangePx) {
+        VisualVehicle em = getVisualVehicle(emergencyId);
+        if (em == null || em.offMapStandby || em.inIntersection) return false;
+        NetworkTopologyConfig top = this.topology;
+        int corridor = (em.direction == 0 || em.direction == 1) ? top.getClosestCol(em.x) : top.getClosestRow(em.y);
+        for (VisualVehicle other : vehicles) {
+            if (other == em || other.offMapStandby || other.isEmergency || other.inIntersection) continue;
+            if (other.direction != em.direction) continue;
+            int otherCorr = (other.direction == 0 || other.direction == 1) ? top.getClosestCol(other.x) : top.getClosestRow(other.y);
+            if (otherCorr != corridor) continue;
+            // Só aciona o corredor central se houver veículos em YIELDING_EMERGENCY ou tráfego a ocupar a faixa 1
+            // (se a faixa 1 já foi totalmente desimpedida via YIELDING_RIGHT legado, mantém-se na faixa 1)
+            if (other.yieldState != VehicleYieldState.YIELDING_EMERGENCY && other.laneIndex != 1) continue;
+            double fwd = 9999.0;
+            switch (em.direction) {
+                case 0: fwd = other.y - em.y; break;
+                case 1: fwd = em.y - other.y; break;
+                case 2: fwd = other.x - em.x; break;
+                case 3: fwd = em.x - other.x; break;
+            }
+            // Mantém-se no corredor central desde que haja carros à frente (até rangePx) ou ainda ao lado (-40px)
+            if (fwd >= -40.0 && fwd <= rangePx) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Verificação básica de segurança no cruzamento para passagem prioritária de viatura de emergência
+     * em sinal vermelho (Opção A): garante ausência de veículos no eixo perpendicular dentro ou a entrar na caixa.
+     */
+    public boolean isIntersectionSafeForEmergencyCross(int interIdx, int emAxis) {
+        NetworkTopologyConfig top = this.topology;
+        if (!top.isValidIntersection(interIdx)) return false;
+        int ix = top.getIntersectionX(interIdx);
+        int iy = top.getIntersectionY(interIdx);
+        int rw = top.getRoadWidth();
+        for (VisualVehicle other : vehicles) {
+            if (other.offMapStandby) continue;
+            int otherAxis = (other.direction == 0 || other.direction == 1) ? 0 : 1;
+            if (otherAxis == emAxis) continue;
+            if (other.crossingIntersection == interIdx || (other.inIntersection && other.activeIntersection == interIdx)) {
+                return false;
+            }
+            // Margem de 18px em torno da caixa do cruzamento para evitar colisões com carros prestes a entrar
+            if (other.x >= ix - 18.0 && other.x <= ix + rw + 18.0
+                    && other.y >= iy - 18.0 && other.y <= iy + rw + 18.0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasActiveEmergencyOnCorridor(VisualVehicle v, NetworkTopologyConfig top, int corridor) {
+        for (VisualVehicle other : vehicles) {
+            if (other.offMapStandby || !other.isEmergency || !other.activeMission) continue;
+            int emDir = other.direction;
+            double refX = other.x;
+            double refY = other.y;
+            if (other.inIntersection) {
+                if (Math.abs(other.turnTargetAngle - 0.0) < 0.1) emDir = 2;
+                else if (Math.abs(other.turnTargetAngle - Math.PI / 2.0) < 0.1) emDir = 0;
+                else if (Math.abs(other.turnTargetAngle - Math.PI) < 0.1 || Math.abs(other.turnTargetAngle + Math.PI) < 0.1) emDir = 3;
+                else if (Math.abs(other.turnTargetAngle + Math.PI / 2.0) < 0.1) emDir = 1;
+                refX = other.turnEndX;
+                refY = other.turnEndY;
+            }
+            if (emDir != v.direction) continue;
+            int emCorridor = (emDir == 0 || emDir == 1) ? top.getClosestCol(refX) : top.getClosestRow(refY);
+            if (emCorridor != corridor) continue;
+            double dist = (emDir == 0 || emDir == 1) ? Math.abs(refY - v.y) : Math.abs(refX - v.x);
+            if (dist <= 340.0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasNormalVehicleInLane1Ahead(VisualVehicle v, NetworkTopologyConfig top, int corridor) {
+        int myTargetInter = top.getTargetIntersection(v.x, v.y, v.direction);
+        for (VisualVehicle other : vehicles) {
+            if (other == v || other.offMapStandby || other.inIntersection) continue;
+            if (other.direction != v.direction || other.laneIndex != 1) continue;
+            int otherCorr = (other.direction == 0 || other.direction == 1) ? top.getClosestCol(other.x) : top.getClosestRow(other.y);
+            if (otherCorr != corridor) continue;
+            if (top.getTargetIntersection(other.x, other.y, other.direction) != myTargetInter) continue;
+            double ahead = -1.0;
+            switch (v.direction) {
+                case 0: ahead = other.y - v.y; break;
+                case 1: ahead = v.y - other.y; break;
+                case 2: ahead = other.x - v.x; break;
+                case 3: ahead = v.x - other.x; break;
+            }
+            if (ahead > -20.0 && ahead <= 220.0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean performLateralShiftToCoord(VisualVehicle v, double targetCoord, double maxRatePx) {
+        double baseAngle;
+        switch (v.direction) {
+            case 0: baseAngle = Math.PI / 2.0; break;
+            case 1: baseAngle = -Math.PI / 2.0; break;
+            case 2: baseAngle = 0.0; break;
+            default: baseAngle = Math.PI; break;
+        }
+        boolean isVertical = (v.direction == 0 || v.direction == 1);
+        double currentCoord = isVertical ? v.x : v.y;
+        double diff = targetCoord - currentCoord;
+
+        if (Math.abs(diff) < 0.6) {
+            double snapX = isVertical ? targetCoord : v.x;
+            double snapY = isVertical ? v.y : targetCoord;
+            if (isMoveBlockedByCollision(v, snapX, snapY, baseAngle)) {
+                v.headingAngle = baseAngle;
+                return false;
+            }
+            v.x = snapX;
+            v.y = snapY;
+            v.headingAngle = baseAngle;
+            return true;
+        }
+
+        double weatherRate = WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition().getMaxLateralShiftRate();
+        double rate = Math.min(maxRatePx, Math.max(weatherRate, maxRatePx * (weatherRate / 0.75)));
+        double step = Math.signum(diff) * Math.min(rate, Math.abs(diff));
+        double candX = isVertical ? (v.x + step) : v.x;
+        double candY = isVertical ? v.y : (v.y + step);
+        double tilt = Math.signum(step) * 0.12;
+        double candAngle = baseAngle + tilt;
+
+        if (isMoveBlockedByCollision(v, candX, candY, baseAngle)) {
+            v.headingAngle = baseAngle;
+            return false;
+        }
+        boolean blockedTilted = isMoveBlockedByCollision(v, candX, candY, candAngle);
+        v.x = candX;
+        v.y = candY;
+        v.headingAngle = blockedTilted ? baseAngle : candAngle;
+        return true;
     }
 
     private void recenterVehicleToCurrentLane(VisualVehicle v, NetworkTopologyConfig top) {
@@ -3493,8 +3832,12 @@ public class CitySimulationGUI {
             return true;
         }
 
-        // Deslocamento lateral gradual adaptado à aderência do piso (Fase 6.4)
+        // Deslocamento lateral gradual adaptado à aderência do piso (Fase 6.4);
+        // durante cedência ativa à emergência (YIELDING_RIGHT), usa taxa ligeiramente mais ágil para libertar logo a faixa 1
         double maxShift = WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition().getMaxLateralShiftRate();
+        if (isEmergencyYield && v.yieldState == VehicleYieldState.YIELDING_RIGHT) {
+            maxShift = Math.min(1.20, maxShift * 1.6);
+        }
         double step = Math.signum(diff) * Math.min(maxShift, Math.abs(diff));
         double candX = isVertical ? (v.x + step) : v.x;
         double candY = isVertical ? v.y : (v.y + step);
@@ -3520,7 +3863,9 @@ public class CitySimulationGUI {
     }
 
     private void alignVehicleLaneWithIntent(VisualVehicle v, NetworkTopologyConfig top) {
-        int desiredLane = v.isEmergency ? 1 : ((v.intent == ManeuverIntent.TURN_LEFT) ? 1 : 0);
+        int desiredLane = v.isEmergency ? 1
+                : (v.intent == ManeuverIntent.TURN_RIGHT ? 0
+                : (v.intent == ManeuverIntent.TURN_LEFT ? 1 : v.laneIndex));
         alignVehicleLaneWithDesired(v, top, desiredLane);
     }
 
@@ -3546,39 +3891,45 @@ public class CitySimulationGUI {
         int iy = top.getIntersectionY(interIdx);
         int rw = top.getRoadWidth();
         int lw = top.getLaneWidth();
-        int outLane = (v.intent == ManeuverIntent.TURN_RIGHT) ? 0 : (v.intent == ManeuverIntent.TURN_LEFT ? 1 : v.laneIndex);
+        int outLane = v.isEmergency ? 1
+                : ((v.intent == ManeuverIntent.TURN_RIGHT) ? 0
+                : (v.intent == ManeuverIntent.TURN_LEFT ? 1 : v.laneIndex));
 
         double checkX = v.x, checkY = v.y;
+        boolean emCentralExit = v.isEmergency && v.usingCentralCorridor && v.intent == ManeuverIntent.GO_STRAIGHT;
         switch (outDir) {
             case 0:
-                checkX = (outLane == 0) ? (ix + 0.5 * lw) : (ix + 1.5 * lw);
+                checkX = emCentralExit ? (ix + 1.0 * lw) : ((outLane == 0) ? (ix + 0.5 * lw) : (ix + 1.5 * lw));
                 checkY = iy + rw + 16;
                 break;
             case 1:
-                checkX = (outLane == 0) ? (ix + 3.5 * lw) : (ix + 2.5 * lw);
+                checkX = emCentralExit ? (ix + 3.0 * lw) : ((outLane == 0) ? (ix + 3.5 * lw) : (ix + 2.5 * lw));
                 checkY = iy - 16;
                 break;
             case 2:
                 checkX = ix + rw + 16;
-                checkY = (outLane == 0) ? (iy + 3.5 * lw) : (iy + 2.5 * lw);
+                checkY = emCentralExit ? (iy + 3.0 * lw) : ((outLane == 0) ? (iy + 3.5 * lw) : (iy + 2.5 * lw));
                 break;
             case 3:
                 checkX = ix - 16;
-                checkY = (outLane == 0) ? (iy + 0.5 * lw) : (iy + 1.5 * lw);
+                checkY = emCentralExit ? (iy + 1.0 * lw) : ((outLane == 0) ? (iy + 0.5 * lw) : (iy + 1.5 * lw));
                 break;
         }
 
         boolean outVertical = (outDir == 0 || outDir == 1);
+        double latThreshold = emCentralExit ? 14.5 : 15.5;
         for (VisualVehicle other : vehicles) {
-            if (other == v || other.inIntersection) continue;
+            if (other == v || other.offMapStandby || other.inIntersection) continue;
             if (other.direction != outDir) continue;
-            // Verificação separada por eixo: faixa lateral (< 16px, pois as faixas distam 24px)
-            // e distância longitudinal (< 34px), evitando que carros na faixa 0 bloqueiem a faixa 1!
+            // Verificação separada por eixo: faixa lateral e distância longitudinal (< 34px)
             double lateralDist = outVertical ? Math.abs(other.x - checkX) : Math.abs(other.y - checkY);
             double longDist = outVertical ? Math.abs(other.y - checkY) : Math.abs(other.x - checkX);
-            if (lateralDist < 16.0 && longDist < 34.0) {
-                // Para emergências em missão, só considera saída bloqueada se a viatura à frente estiver quase parada
+            if (lateralDist < latThreshold && longDist < 34.0) {
+                // Se a viatura à frente já está a afastar-se fluidamente na saída, não trava o carro seguinte no verde
                 if (v.isEmergency && v.activeMission && other.currentSpeed >= 0.45) {
+                    continue;
+                }
+                if (!v.isEmergency && other.currentSpeed >= 1.2 && longDist > 20.0) {
                     continue;
                 }
                 return true;
@@ -3590,6 +3941,14 @@ public class CitySimulationGUI {
     private void handleBoundaryWrapAround(VisualVehicle v, NetworkTopologyConfig top) {
         int ww = top.getWorldWidth();
         int wh = top.getWorldHeight();
+        boolean exitedBoundary = (v.y > wh + 25) || (v.y < -35) || (v.x > ww + 25) || (v.x < -35);
+
+        // Opção 1: Viatura de emergência concluiu a missão e saiu fisicamente do mapa -> entra em standby fora do mapa
+        if (exitedBoundary && v.isEmergency && v.exitingMap) {
+            enterEmergencyOffMapStandby(v, top);
+            return;
+        }
+
         boolean wrapped = false;
 
         if (v.y > wh + 25) {
@@ -3620,13 +3979,94 @@ public class CitySimulationGUI {
             v.wasStopped = false;
             v.crossingIntersection = -1;
             v.inIntersection = false;
+            v.currentLateralOffsetPx = 0.0;
+            v.usingCentralCorridor = false;
             int firstNode = top.getTargetIntersection(v.x, v.y, v.direction);
             int nextDest = selectNextDestination(firstNode, v.direction, v.completedRoutesCount + 1);
             assignAStarRoute(v, firstNode, nextDest);
-            if (v.isEmergency) {
-                v.intent = ManeuverIntent.GO_STRAIGHT;
+        }
+    }
+
+    private void enterEmergencyOffMapStandby(VisualVehicle v, NetworkTopologyConfig top) {
+        int interCount = top.getIntersectionCount();
+        for (int i = 0; i < interCount; i++) {
+            IntersectionSafetyAuthority.getAuthority(i).notifyEmergencyCleared(v.id);
+        }
+        v.completedRoutesCount++;
+        v.offMapStandby = true;
+        v.exitingMap = false;
+        v.activeMission = false;
+        v.usingCentralCorridor = false;
+        v.currentSpeed = 0.0;
+        v.isBraking = false;
+        v.wasStopped = false;
+        v.crossingIntersection = -1;
+        v.inIntersection = false;
+        v.currentLateralOffsetPx = 0.0;
+        v.x = -2000.0;
+        v.y = -2000.0;
+        if (v.mission != null) {
+            v.mission.setState(EmergencyMission.MissionState.COMPLETED);
+        }
+        long standbyMs = 8000L + (Math.abs(v.id.hashCode() + v.completedRoutesCount * 37) % 5000L);
+        v.offMapReentryAtMillis = System.currentTimeMillis() + standbyMs;
+        System.out.println("[EmergencyDispatch] Viatura " + v.id + " concluiu a missão #" + v.completedRoutesCount
+                + " e saiu do mapa (nova ocorrência em ~" + String.format(Locale.ROOT, "%.1f", standbyMs / 1000.0) + "s).");
+    }
+
+    private void reenterEmergencyFromBorder(VisualVehicle v, NetworkTopologyConfig top) {
+        int ww = top.getWorldWidth();
+        int wh = top.getWorldHeight();
+        int seedDir = Math.abs(v.id.hashCode() + v.completedRoutesCount * 5) % 4;
+        int seedCorr = Math.abs(v.id.hashCode() + v.completedRoutesCount * 3);
+
+        for (int dOff = 0; dOff < 4; dOff++) {
+            int entryDir = (seedDir + dOff) % 4;
+            int numCorridors = (entryDir == 0 || entryDir == 1) ? top.getCols() : top.getRows();
+            for (int cOff = 0; cOff < numCorridors; cOff++) {
+                int corridor = (seedCorr + cOff) % numCorridors;
+                double laneCoord = top.getLaneCenterCoordinate(corridor, entryDir, 1);
+                double candX, candY;
+                switch (entryDir) {
+                    case 0: candX = laneCoord; candY = -24.0; break;
+                    case 1: candX = laneCoord; candY = wh + 24.0; break;
+                    case 2: candX = -24.0; candY = laneCoord; break;
+                    default: candX = ww + 24.0; candY = laneCoord; break;
+                }
+                if (isSpawnPositionClear(candX, candY, 42.0)) {
+                    v.x = candX;
+                    v.y = candY;
+                    v.direction = entryDir;
+                    v.laneIndex = 1;
+                    v.headingAngle = VisualVehicle.getInitialAngle(entryDir);
+                    v.currentSpeed = v.maxSpeed * 0.75;
+                    v.isBraking = false;
+                    v.wasStopped = false;
+                    v.startDelayTicks = 0;
+                    v.crossingIntersection = -1;
+                    v.inIntersection = false;
+                    v.currentLateralOffsetPx = 0.0;
+                    v.usingCentralCorridor = false;
+                    v.exitingMap = false;
+                    v.offMapStandby = false;
+                    v.activeMission = true;
+                    v.mission = new EmergencyMission(
+                            "MIS_" + v.id + "_" + (v.completedRoutesCount + 1),
+                            v.id, v.category, v.urgencyLevel,
+                            "Nova Ocorrencia de Socorro (" + v.category + ")"
+                    );
+                    int firstNode = top.getTargetIntersection(v.x, v.y, v.direction);
+                    int nextDest = selectNextDestination(firstNode, v.direction, v.completedRoutesCount + 1);
+                    assignAStarRoute(v, firstNode, nextDest);
+                    String edgeName = (entryDir == 0) ? "Norte" : (entryDir == 1 ? "Sul" : (entryDir == 2 ? "Oeste" : "Este"));
+                    System.out.println("[EmergencyDispatch] Nova ocorrência! Viatura " + v.id
+                            + " a entrar no mapa pela margem " + edgeName + " (corredor " + (corridor + 1) + ").");
+                    return;
+                }
             }
         }
+        // Todas as entradas momentaneamente ocupadas: tenta novamente dentro de 500ms sem sobreposição
+        v.offMapReentryAtMillis = System.currentTimeMillis() + 500L;
     }
 
     private double findSafeWrapCoordinate(VisualVehicle self, double baseX, double baseY, int dir, double stepOffset) {
@@ -3635,7 +4075,7 @@ public class CitySimulationGUI {
         for (int attempt = 0; attempt < 60; attempt++) {
             boolean clash = false;
             for (VisualVehicle other : vehicles) {
-                if (other == self) continue;
+                if (other == self || other.offMapStandby) continue;
                 if (Math.hypot(other.x - candX, other.y - candY) < 36.0) {
                     clash = true;
                     break;
@@ -3653,13 +4093,13 @@ public class CitySimulationGUI {
     public double getDistanceToLeadingVehicle(VisualVehicle v) {
         double minDist = 9999.0;
         for (VisualVehicle other : vehicles) {
-            if (other == v || other.direction != v.direction) continue;
+            if (other == v || other.offMapStandby || other.direction != v.direction) continue;
 
-            // Verificar se estão na mesma faixa física ou a invadir lateralmente (largura 14px + folga; faixa = 24px)
+            // Verificar se estão na mesma trajetória física (14.5px ≈ largura do carro 14px, permitindo passagem no corredor central)
             if (v.direction == 0 || v.direction == 1) {
-                if (Math.abs(other.x - v.x) > 17.5) continue;
+                if (Math.abs(other.x - v.x) > 14.5) continue;
             } else {
-                if (Math.abs(other.y - v.y) > 17.5) continue;
+                if (Math.abs(other.y - v.y) > 14.5) continue;
             }
 
             double d = 9999.0;
@@ -3686,7 +4126,7 @@ public class CitySimulationGUI {
         VisualVehicle leading = null;
         double minDist = 9999.0;
         for (VisualVehicle other : vehicles) {
-            if (other == v || other.direction != v.direction) continue;
+            if (other == v || other.offMapStandby || other.direction != v.direction) continue;
 
             if (v.direction == 0 || v.direction == 1) {
                 if (Math.abs(other.x - v.x) > 17.5) continue;
@@ -3734,48 +4174,75 @@ public class CitySimulationGUI {
         v.turnStartAngle = v.headingAngle;
 
         if (v.intent == ManeuverIntent.TURN_RIGHT) {
-            v.laneIndex = 0;
-            switch (v.direction) {
-                case 0: // N->S virando para Oeste (E->W)
-                    v.turnEndX = ix - 2;
-                    v.turnEndY = iy + 0.5 * lw;
-                    v.turnTargetAngle = Math.PI;
-                    break;
-                case 1: // S->N virando para Este (W->E)
-                    v.turnEndX = ix + rw + 2;
-                    v.turnEndY = iy + 3.5 * lw;
-                    v.turnTargetAngle = 0.0;
-                    break;
-                case 2: // W->E virando para Sul (N->S)
-                    v.turnEndX = ix + 0.5 * lw;
-                    v.turnEndY = iy + rw + 2;
-                    v.turnTargetAngle = Math.PI / 2.0;
-                    break;
-                case 3: // E->W virando para Norte (S->N)
-                    v.turnEndX = ix + 3.5 * lw;
-                    v.turnEndY = iy - 2;
-                    v.turnTargetAngle = -Math.PI / 2.0;
-                    break;
+            if (v.isEmergency) {
+                // Viaturas de emergência mantêm-se na faixa esquerda (1) mesmo ao virar à direita
+                v.laneIndex = 1;
+                switch (v.direction) {
+                    case 0: // N->S virando para Oeste (E->W, faixa 1)
+                        v.turnEndX = ix - 2;
+                        v.turnEndY = iy + 1.5 * lw;
+                        v.turnTargetAngle = Math.PI;
+                        break;
+                    case 1: // S->N virando para Este (W->E, faixa 1)
+                        v.turnEndX = ix + rw + 2;
+                        v.turnEndY = iy + 2.5 * lw;
+                        v.turnTargetAngle = 0.0;
+                        break;
+                    case 2: // W->E virando para Sul (N->S, faixa 1)
+                        v.turnEndX = ix + 1.5 * lw;
+                        v.turnEndY = iy + rw + 2;
+                        v.turnTargetAngle = Math.PI / 2.0;
+                        break;
+                    case 3: // E->W virando para Norte (S->N, faixa 1)
+                        v.turnEndX = ix + 2.5 * lw;
+                        v.turnEndY = iy - 2;
+                        v.turnTargetAngle = -Math.PI / 2.0;
+                        break;
+                }
+            } else {
+                v.laneIndex = 0;
+                switch (v.direction) {
+                    case 0: // N->S virando para Oeste (E->W)
+                        v.turnEndX = ix - 2;
+                        v.turnEndY = iy + 0.5 * lw;
+                        v.turnTargetAngle = Math.PI;
+                        break;
+                    case 1: // S->N virando para Este (W->E)
+                        v.turnEndX = ix + rw + 2;
+                        v.turnEndY = iy + 3.5 * lw;
+                        v.turnTargetAngle = 0.0;
+                        break;
+                    case 2: // W->E virando para Sul (N->S)
+                        v.turnEndX = ix + 0.5 * lw;
+                        v.turnEndY = iy + rw + 2;
+                        v.turnTargetAngle = Math.PI / 2.0;
+                        break;
+                    case 3: // E->W virando para Norte (S->N)
+                        v.turnEndX = ix + 3.5 * lw;
+                        v.turnEndY = iy - 2;
+                        v.turnTargetAngle = -Math.PI / 2.0;
+                        break;
+                }
             }
         } else if (v.intent == ManeuverIntent.TURN_LEFT) {
             v.laneIndex = 1;
             switch (v.direction) {
-                case 0: // N->S virando para Este (W->E)
+                case 0: // N->S virando para Este (W->E, faixa 1)
                     v.turnEndX = ix + rw + 2;
                     v.turnEndY = iy + 2.5 * lw;
                     v.turnTargetAngle = 0.0;
                     break;
-                case 1: // S->N virando para Oeste (E->W)
+                case 1: // S->N virando para Oeste (E->W, faixa 1)
                     v.turnEndX = ix - 2;
                     v.turnEndY = iy + 1.5 * lw;
                     v.turnTargetAngle = Math.PI;
                     break;
-                case 2: // W->E virando para Norte (S->N)
+                case 2: // W->E virando para Norte (S->N, faixa 1)
                     v.turnEndX = ix + 2.5 * lw;
                     v.turnEndY = iy - 2;
                     v.turnTargetAngle = -Math.PI / 2.0;
                     break;
-                case 3: // E->W virando para Sul (N->S)
+                case 3: // E->W virando para Sul (N->S, faixa 1)
                     v.turnEndX = ix + 1.5 * lw;
                     v.turnEndY = iy + rw + 2;
                     v.turnTargetAngle = Math.PI / 2.0;
@@ -4028,7 +4495,7 @@ public class CitySimulationGUI {
         private void drawSelectedVehicleRoute(Graphics2D g2) {
             if (selectedVehicleId == null) return;
             VisualVehicle v = getVisualVehicle(selectedVehicleId);
-            if (v == null || v.activeRoute == null || v.activeRoute.nodePath == null || v.activeRoute.nodePath.isEmpty()) {
+            if (v == null || v.offMapStandby || v.activeRoute == null || v.activeRoute.nodePath == null || v.activeRoute.nodePath.isEmpty()) {
                 return;
             }
 
@@ -4370,6 +4837,7 @@ public class CitySimulationGUI {
             String selId = selectedVehicleId;
 
             for (VisualVehicle v : vehicles) {
+                if (v.offMapStandby) continue;
                 AffineTransform old = g2.getTransform();
 
                 g2.translate(v.x, v.y);
@@ -4446,15 +4914,22 @@ public class CitySimulationGUI {
                     g2.drawString(fullTag, tagX, tagY);
                 } else if (v.isEmergency) {
                     g2.setColor(colEmergText);
-                    g2.setFont(fontBold9);
-                    String prefix = v.category.equals("FIRE_TRUCK") ? "[BOM] " : (v.category.equals("POLICE") ? "[POL] " : "[AMB] ");
+                    g2.setFont(fontBold8);
+                    String prefix = v.category.equals("FIRE_TRUCK") ? "[BOM]" : (v.category.equals("POLICE") ? "[POL]" : "[AMB]");
                     String urgTag = " U" + v.urgencyLevel + (v.activeMission ? "" : " (INAT)");
-                    g2.drawString(prefix + v.id + urgTag, (int) Math.round(v.x) - 24, (int) Math.round(v.y) - 10);
-                } else if (v.yieldState != null && v.yieldState != VehicleYieldState.NORMAL_DRIVING) {
+                    String label = prefix + urgTag;
+                    int lwTag = g2.getFontMetrics().stringWidth(label);
+                    g2.drawString(label, (int) Math.round(v.x) - lwTag / 2, (int) Math.round(v.y) - 10);
+                } else if (v.yieldState != null
+                        && v.yieldState != VehicleYieldState.NORMAL_DRIVING
+                        && v.yieldState != VehicleYieldState.RESUMING_ROUTE) {
                     g2.setFont(fontBold8);
                     String badge;
                     Color badgeBg;
-                    if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
+                    if (v.yieldState == VehicleYieldState.YIELDING_EMERGENCY) {
+                        badge = (v.laneIndex == 1) ? "<< CORREDOR" : "CORREDOR >>";
+                        badgeBg = colYieldGreen;
+                    } else if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
                         badge = "CEDER >>";
                         badgeBg = colYieldOrange;
                     } else if (v.yieldState == VehicleYieldState.YIELDING_STOPPED || v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
@@ -4463,19 +4938,19 @@ public class CitySimulationGUI {
                     } else if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
                         badge = "INSEGURO";
                         badgeBg = colYieldRed;
-                    } else if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
-                        badge = "RETOMA";
-                        badgeBg = colYieldBlue;
                     } else {
                         badge = v.yieldState.name();
                         badgeBg = colYieldGray;
                     }
-                    int bw = g2.getFontMetrics().stringWidth(badge) + 6;
-                    int badgeYOffset = (v.laneIndex == 0) ? 20 : 8;
+                    int bw = g2.getFontMetrics().stringWidth(badge) + 5;
+                    int bx = (int) Math.round(v.x) - bw / 2;
+                    int by = (v.laneIndex == 0)
+                            ? ((int) Math.round(v.y) - 12)
+                            : ((int) Math.round(v.y) + 15);
                     g2.setColor(badgeBg);
-                    g2.fillRoundRect((int) Math.round(v.x) - bw / 2, (int) Math.round(v.y) - badgeYOffset - 9, bw, 11, 4, 4);
+                    g2.fillRoundRect(bx, by - 8, bw, 10, 4, 4);
                     g2.setColor(Color.WHITE);
-                    g2.drawString(badge, (int) Math.round(v.x) - bw / 2 + 3, (int) Math.round(v.y) - badgeYOffset);
+                    g2.drawString(badge, bx + 2, by);
                 } else {
                     g2.setFont(fontBold8);
                     g2.setColor(colMicroTag);
@@ -4550,12 +5025,20 @@ public class CitySimulationGUI {
             g2.drawString(statusPrefix + disruptionNotice + weatherText + mlText + yieldHud, hudX + 14, hudY + 58);
 
             int normalCars = 0;
-            int priorityCars = 0;
+            int priorityTotal = 0;
+            int priorityOnMap = 0;
             int stoppedCars = 0;
             for (VisualVehicle v : vehicles) {
-                if (v.isEmergency) priorityCars++;
-                else normalCars++;
-                if (v.currentSpeed < 0.2) stoppedCars++;
+                if (v.isEmergency) {
+                    priorityTotal++;
+                    if (!v.offMapStandby) {
+                        priorityOnMap++;
+                        if (v.currentSpeed < 0.2) stoppedCars++;
+                    }
+                } else {
+                    normalCars++;
+                    if (v.currentSpeed < 0.2) stoppedCars++;
+                }
             }
             long elapsedSec = (System.currentTimeMillis() - simulationStartMillis) / 1000;
             double avgWait = getAverageWaitSeconds();
@@ -4563,7 +5046,7 @@ public class CitySimulationGUI {
 
             // Badges de Telemetria
             drawBadge(g2, hudX + 235, hudY + 10, "NORMAIS", normalCars + "/" + FleetLifecycleManager.MAX_NORMAL_VEHICLES, colBadgeNorm);
-            drawBadge(g2, hudX + 312, hudY + 10, "PRIORIT.", String.valueOf(priorityCars), colBadgePrio);
+            drawBadge(g2, hudX + 312, hudY + 10, "PRIORIT.", priorityOnMap + "/" + priorityTotal, colBadgePrio);
             drawBadge(g2, hudX + 372, hudY + 10, "JADE", String.valueOf(jadeAgents > 0 ? jadeAgents : vehicles.size()), colBadgeJade);
             drawBadge(g2, hudX + 422, hudY + 10, "PARADOS", String.valueOf(stoppedCars), (stoppedCars > 0) ? colBadgeStop : colBadgeGo);
             drawBadge(g2, hudX + 485, hudY + 10, "ESPERA", avgWait + "s", colBadgeWait);

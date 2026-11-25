@@ -1,9 +1,12 @@
 package agents;
 
+import environment.AStarPathfinder;
 import environment.CitySimulationGUI;
 import environment.EmergencyMission;
 import environment.FleetLifecycleManager;
+import environment.ManhattanHeuristic;
 import environment.NetworkTopologyConfig;
+import environment.RoadNetworkGraph;
 import environment.TrafficEnvironment;
 import environment.VehicleAction;
 import environment.VehicleControlGateway;
@@ -23,6 +26,7 @@ import metrics.TrafficMetricsCollector;
 
 import java.awt.Color;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -61,11 +65,27 @@ public class EmergencyVehicleAgent extends Agent {
     private EmergencyMission mission;
 
     private int currentTargetIntersection = -1;
+    private int currentTargetAxis = -1;
     private int lookaheadTargetIntersection = -1;
+    private int lookaheadTargetAxis = -1;
     private VehicleCrossingState crossingState = VehicleCrossingState.APROXIMACAO;
     private long lastRequestSentMillis = 0;
     private long lastYieldRequestSentMillis = 0;
     private long decisionSequence = 0L;
+    private long lastLivePerceptionTimestamp = -1L;
+    private int livePerceptionTicks = 0;
+
+    // Planeamento autónomo de rotas A* com saída do mapa ao concluir missão e reentrada em nova ocorrência
+    private int originNode = 0;
+    private int destinationNode = -1;
+    private AStarPathfinder.RouteResult activeRoute = null;
+    private CitySimulationGUI.ManeuverIntent plannedIntent = CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
+    private long routeGraphVersion = -1L;
+    private int completedRoutesCount = 0;
+    private boolean exitingMap = false;
+    private int exitDirection = -1;
+    private boolean wasOffMapStandby = false;
+    private final ManhattanHeuristic heuristic = new ManhattanHeuristic();
 
     @Override
     protected void setup() {
@@ -217,22 +237,70 @@ public class EmergencyVehicleAgent extends Agent {
     }
 
     private void gerirNavegacaoECruzamento() {
+        if (environment.SimulationClock.isSimulatedMode()) {
+            return;
+        }
         VehiclePerception p = VehicleControlGateway.getInstance().getLatestPerception(getLocalName());
+        if (p != null && p.getTimestampMillis() != lastLivePerceptionTimestamp) {
+            lastLivePerceptionTimestamp = p.getTimestampMillis();
+            if (livePerceptionTicks < 10) livePerceptionTicks++;
+        }
+        boolean hasLivePerception = (livePerceptionTicks >= 3);
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         NetworkTopologyConfig topo = (gui != null) ? gui.getTopology() : TrafficEnvironment.getInstance().getTopology();
+        CitySimulationGUI.VisualVehicle vvLive = (gui != null) ? gui.getVisualVehicle(getLocalName()) : null;
 
-        if (p == null && gui != null) {
-            CitySimulationGUI.VisualVehicle vv = gui.getVisualVehicle(getLocalName());
-            if (vv != null) {
-                int nextInter = topo.getTargetIntersection(vv.x, vv.y, vv.direction);
-                double distStop = topo.getBumperDistanceToTargetStopLine(vv.x, vv.y, vv.direction);
-                p = new VehiclePerception(
-                        getLocalName(), vv.x, vv.y, vv.currentSpeed, vv.maxSpeed,
-                        vv.direction, vv.laneIndex, vv.inIntersection, nextInter, distStop,
-                        CitySimulationGUI.LightState.GREEN, 9999.0, -1.0, 1L, 1.0,
-                        System.currentTimeMillis(), 0L
-                );
+        // Gestão do ciclo de vida fora do mapa (standby após conclusão de missão e reentrada em nova ocorrência)
+        if (vvLive != null && vvLive.offMapStandby) {
+            this.wasOffMapStandby = true;
+            if (currentTargetIntersection >= 0) {
+                notificarDesimpedimento(currentTargetIntersection, currentTargetAxis >= 0 ? currentTargetAxis : this.axis);
+                currentTargetIntersection = -1;
+                currentTargetAxis = -1;
             }
+            if (lookaheadTargetIntersection >= 0) {
+                notificarDesimpedimento(lookaheadTargetIntersection, lookaheadTargetAxis >= 0 ? lookaheadTargetAxis : this.axis);
+                lookaheadTargetIntersection = -1;
+                lookaheadTargetAxis = -1;
+            }
+            this.crossingState = VehicleCrossingState.APROXIMACAO;
+            this.exitingMap = false;
+            this.exitDirection = -1;
+            this.activeRoute = null;
+            this.destinationNode = -1;
+            this.activeMission = false;
+            if (this.mission != null && this.mission.isActive()) {
+                this.mission.setState(EmergencyMission.MissionState.COMPLETED);
+            }
+            return;
+        }
+        if (vvLive != null && !vvLive.offMapStandby && this.wasOffMapStandby) {
+            this.wasOffMapStandby = false;
+            this.activeMission = vvLive.activeMission;
+            if (vvLive.mission != null) {
+                this.mission = vvLive.mission;
+            }
+            this.completedRoutesCount = vvLive.completedRoutesCount;
+            this.exitingMap = false;
+            this.exitDirection = -1;
+            this.activeRoute = null;
+            this.destinationNode = -1;
+            this.crossingState = VehicleCrossingState.APROXIMACAO;
+            this.currentTargetIntersection = -1;
+            this.currentTargetAxis = -1;
+            this.lookaheadTargetIntersection = -1;
+            this.lookaheadTargetAxis = -1;
+        }
+
+        if (p == null && vvLive != null) {
+            int nextInter = topo.getTargetIntersection(vvLive.x, vvLive.y, vvLive.direction);
+            double distStop = topo.getBumperDistanceToTargetStopLine(vvLive.x, vvLive.y, vvLive.direction);
+            p = new VehiclePerception(
+                    getLocalName(), vvLive.x, vvLive.y, vvLive.currentSpeed, vvLive.maxSpeed,
+                    vvLive.direction, vvLive.laneIndex, vvLive.inIntersection, nextInter, distStop,
+                    CitySimulationGUI.LightState.GREEN, 9999.0, -1.0, 1L, 1.0,
+                    System.currentTimeMillis(), 0L
+            );
         }
 
         if (p == null) return;
@@ -240,13 +308,18 @@ public class EmergencyVehicleAgent extends Agent {
         this.visualDirection = p.getDirection();
         this.axis = (this.visualDirection == 0 || this.visualDirection == 1) ? 0 : 1;
 
+        // 0. Atualização autónoma da rota A* (permite viragens à esquerda, direita e em frente na malha urbana)
+        if (!p.isInIntersection()) {
+            atualizarRotaAStarEmergencia(p, topo, gui);
+        }
+
         int interIdx = p.getApproachingIntersection();
         double distToStop = p.getDistanceToStopLine();
         long now = System.currentTimeMillis();
 
         // Se a missão não está ativa, não solicita prioridades
         if (!activeMission || (mission != null && !mission.isActive())) {
-            publicarDecisaoEmergencia(p, VehicleAction.CRUISE, p.getMaxSpeed() * 0.75, 1, "CONDUCAO_NORMAL_SEM_MISSAO");
+            publicarDecisaoEmergencia(p, VehicleAction.CRUISE, p.getMaxSpeed() * 0.75, 1, "CONDUCAO_NORMAL_SEM_MISSAO", false);
             return;
         }
 
@@ -256,95 +329,127 @@ public class EmergencyVehicleAgent extends Agent {
             emitirYieldRequestParaLideres(p, topo);
         }
 
-        // 2. Preempção Semafórica Segura com Onda Verde Antecipada (Lookahead no corredor)
-        if (interIdx >= 0 && interIdx < topo.getIntersectionCount()) {
+        // 2. Preempção Semafórica Segura com Onda Verde Antecipada (Lookahead ao longo da rota A*)
+        if (!p.isInIntersection() && interIdx >= 0 && interIdx < topo.getIntersectionCount()) {
             // Se saiu completamente do último cruzamento do corredor (rumo ao wrap-around), liberta-o de imediato
             if (distToStop < -96.0 && currentTargetIntersection == interIdx) {
-                notificarDesimpedimento(currentTargetIntersection);
+                notificarDesimpedimento(currentTargetIntersection, currentTargetAxis >= 0 ? currentTargetAxis : this.axis);
                 currentTargetIntersection = -1;
+                currentTargetAxis = -1;
                 crossingState = VehicleCrossingState.APROXIMACAO;
             }
 
             if (distToStop >= 0.0 && distToStop <= 360.0
-                    && (currentTargetIntersection != interIdx || crossingState == VehicleCrossingState.APROXIMACAO)) {
-                if (currentTargetIntersection >= 0 && currentTargetIntersection != interIdx) {
-                    notificarDesimpedimento(currentTargetIntersection);
+                    && (currentTargetIntersection != interIdx || currentTargetAxis != this.axis || crossingState == VehicleCrossingState.APROXIMACAO)) {
+                if (currentTargetIntersection >= 0 && (currentTargetIntersection != interIdx || currentTargetAxis != this.axis)) {
+                    notificarDesimpedimento(currentTargetIntersection, currentTargetAxis >= 0 ? currentTargetAxis : this.axis);
                 }
                 currentTargetIntersection = interIdx;
-                if (lookaheadTargetIntersection == interIdx) {
-                    // O pedido antecipado de onda verde já foi enviado para este cruzamento;
+                currentTargetAxis = this.axis;
+                if (lookaheadTargetIntersection == interIdx && lookaheadTargetAxis == this.axis) {
+                    // O pedido antecipado de onda verde já foi enviado para este cruzamento e eixo;
                     // se ainda não estiver verde, reforça o pedido (idempotente) para garantir preempção ativa
                     lookaheadTargetIntersection = -1;
+                    lookaheadTargetAxis = -1;
                     lastRequestSentMillis = now;
                     if (p.isLightGreen()) {
                         crossingState = VehicleCrossingState.PASSAGEM_SEGURA;
                     } else {
-                        enviarPedidoPreempcao(topo, interIdx, distToStop, false);
+                        enviarPedidoPreempcao(topo, interIdx, this.axis, distToStop, false);
                         crossingState = VehicleCrossingState.AGUARDA_VERDE;
                     }
                 } else {
+                    if (lookaheadTargetIntersection == interIdx) {
+                        // O lookahead tinha sido enviado para outro eixo: limpa-o antes de pedir o eixo real
+                        notificarDesimpedimento(lookaheadTargetIntersection, lookaheadTargetAxis >= 0 ? lookaheadTargetAxis : this.axis);
+                        lookaheadTargetIntersection = -1;
+                        lookaheadTargetAxis = -1;
+                    }
                     crossingState = VehicleCrossingState.PEDIDO_ENVIADO;
                     lastRequestSentMillis = now;
-                    enviarPedidoPreempcao(topo, interIdx, distToStop, false);
+                    enviarPedidoPreempcao(topo, interIdx, this.axis, distToStop, false);
                     crossingState = p.isLightGreen() ? VehicleCrossingState.PASSAGEM_SEGURA : VehicleCrossingState.AGUARDA_VERDE;
                 }
-            } else if (crossingState == VehicleCrossingState.AGUARDA_VERDE
-                    && !p.isLightGreen()
-                    && (now - lastRequestSentMillis > 1000L)
-                    && distToStop >= 0.0 && distToStop <= 360.0) {
-                lastRequestSentMillis = now;
-                enviarPedidoPreempcao(topo, interIdx, distToStop, true);
+            } else if (!p.isLightGreen() && distToStop >= 0.0 && distToStop <= 360.0) {
+                // Nunca fica preso em PASSAGEM_SEGURA se o sinal mudou para vermelho/amarelo: reenvia preempção
+                crossingState = VehicleCrossingState.AGUARDA_VERDE;
+                if (now - lastRequestSentMillis > 1000L) {
+                    lastRequestSentMillis = now;
+                    enviarPedidoPreempcao(topo, interIdx, this.axis, distToStop, true);
+                }
             }
 
-            // Onda verde antecipada: solicita preempção segura ao cruzamento adjacente seguinte do corredor
-            // ~3-3.5s antes da chegada para que YELLOW (1.5s) + ALL_RED (1.0s) terminem antes da stop line
-            int adjacentDownstream = getAdjacentCorridorIntersection(topo, interIdx, visualDirection);
-            if (adjacentDownstream >= 0 && distToStop >= -20.0 && distToStop <= 155.0) {
-                if (adjacentDownstream != lookaheadTargetIntersection) {
+            // Onda verde antecipada sensível à rota A* (funciona em frente, à esquerda e à direita!):
+            // dispara apenas quando o cruzamento atual já está verde (evitando bloquear prematuramente o nó seguinte)
+            int[] nextHop = resolveNextRouteHop(topo, interIdx, visualDirection);
+            int nextInterIdx = nextHop[0];
+            int nextInterAxis = nextHop[1];
+
+            if (hasLivePerception && !this.exitingMap && nextInterIdx >= 0 && nextInterIdx != interIdx
+                    && p.isLightGreen() && p.getCurrentSpeed() >= 0.5
+                    && distToStop >= -20.0 && distToStop <= 125.0) {
+                if (nextInterIdx != lookaheadTargetIntersection || nextInterAxis != lookaheadTargetAxis) {
                     if (lookaheadTargetIntersection >= 0 && lookaheadTargetIntersection != currentTargetIntersection) {
-                        notificarDesimpedimento(lookaheadTargetIntersection);
+                        notificarDesimpedimento(lookaheadTargetIntersection, lookaheadTargetAxis >= 0 ? lookaheadTargetAxis : this.axis);
                     }
-                    lookaheadTargetIntersection = adjacentDownstream;
-                    enviarPedidoPreempcao(topo, adjacentDownstream, Math.max(0.0, distToStop) + 215.0, false);
+                    lookaheadTargetIntersection = nextInterIdx;
+                    lookaheadTargetAxis = nextInterAxis;
+                    enviarPedidoPreempcao(topo, nextInterIdx, nextInterAxis, Math.max(0.0, distToStop) + 215.0, false);
                 }
-            } else if (adjacentDownstream < 0 && distToStop < -96.0 && isNearWrapBoundary(topo, p.getX(), p.getY(), visualDirection, 110.0)) {
-                // Após sair do último cruzamento do corredor e já perto da fronteira de wrap-around (~3s do 1.º cruzamento),
-                // antecipa a onda verde para o primeiro cruzamento de entrada do mesmo corredor
+            } else if (!this.exitingMap && nextInterIdx < 0 && distToStop < -96.0 && isNearWrapBoundary(topo, p.getX(), p.getY(), visualDirection, 110.0)) {
                 int wrapEntryIdx = getWrapEntryIntersection(topo, interIdx, visualDirection);
-                if (wrapEntryIdx >= 0 && wrapEntryIdx != interIdx && wrapEntryIdx != lookaheadTargetIntersection) {
+                if (wrapEntryIdx >= 0 && wrapEntryIdx != interIdx
+                        && (wrapEntryIdx != lookaheadTargetIntersection || this.axis != lookaheadTargetAxis)) {
                     if (lookaheadTargetIntersection >= 0 && lookaheadTargetIntersection != currentTargetIntersection) {
-                        notificarDesimpedimento(lookaheadTargetIntersection);
+                        notificarDesimpedimento(lookaheadTargetIntersection, lookaheadTargetAxis >= 0 ? lookaheadTargetAxis : this.axis);
                     }
                     lookaheadTargetIntersection = wrapEntryIdx;
-                    enviarPedidoPreempcao(topo, wrapEntryIdx, 260.0, false);
+                    lookaheadTargetAxis = this.axis;
+                    enviarPedidoPreempcao(topo, wrapEntryIdx, this.axis, 260.0, false);
                 }
+            } else if (this.exitingMap && lookaheadTargetIntersection >= 0 && lookaheadTargetIntersection != currentTargetIntersection) {
+                notificarDesimpedimento(lookaheadTargetIntersection, lookaheadTargetAxis >= 0 ? lookaheadTargetAxis : this.axis);
+                lookaheadTargetIntersection = -1;
+                lookaheadTargetAxis = -1;
             }
 
             if ((crossingState == VehicleCrossingState.PASSAGEM_SEGURA || crossingState == VehicleCrossingState.ATRAVESSANDO)
                     && (distToStop > 380.0 || currentTargetIntersection != interIdx)) {
-                notificarDesimpedimento(currentTargetIntersection >= 0 ? currentTargetIntersection : interIdx);
+                notificarDesimpedimento(currentTargetIntersection >= 0 ? currentTargetIntersection : interIdx,
+                        currentTargetAxis >= 0 ? currentTargetAxis : this.axis);
                 crossingState = VehicleCrossingState.APROXIMACAO;
                 currentTargetIntersection = -1;
+                currentTargetAxis = -1;
             }
         }
 
-        // 3. Deliberação e Controlo Cinemático Autónomo Adaptado à Meteorologia (Fase 6.4)
+        // 3. Deliberação e Controlo Cinemático Autónomo + Corredor de Emergência Central + Prioridade em Semáforo Vermelho (Opção A)
         double safeSpeedFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeSpeedFactor() : 1.0;
         double safeDistanceFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeDistanceFactor() : 1.0;
         double effectiveMaxSpeed = p.getMaxSpeed() * safeSpeedFactor;
+
+        // Ativa o alinhamento pelo eixo central entre as 2 vias sempre que há tráfego à frente/lado no corredor
+        boolean useCentralCorridor = !p.isInIntersection()
+                && (gui != null && gui.hasTrafficAheadOnCorridor(getLocalName(), 280.0));
 
         double baseObstacleThreshold = 34.0 * safeDistanceFactor;
         double stopLineThreshold = Math.max(55.0, 55.0 * safeDistanceFactor);
 
         boolean obstacleAhead = p.hasLeadingObstacle(baseObstacleThreshold);
-        boolean redLightAhead = p.isApproachingStopLine(stopLineThreshold) && !p.isLightGreen();
+        boolean intersectionSafeForRedPriority = (gui != null && interIdx >= 0
+                && gui.isIntersectionSafeForEmergencyCross(interIdx, this.axis));
+        // Opção A: prioridade máxima sobre semáforos vermelhos com verificação básica de segurança no cruzamento
+        boolean mustStopForRedLight = p.isApproachingStopLine(stopLineThreshold)
+                && !p.isLightGreen()
+                && !intersectionSafeForRedPriority;
+
         VehicleAction act;
         double targetSpd;
 
-        if (obstacleAhead || redLightAhead) {
+        if (obstacleAhead || mustStopForRedLight) {
             double safetyMarginPx = 31.0 * safeDistanceFactor;
             double limitDist = obstacleAhead
-                    ? (redLightAhead ? Math.min(p.getDistanceToLeadingVehicle() - safetyMarginPx, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - safetyMarginPx))
+                    ? (mustStopForRedLight ? Math.min(p.getDistanceToLeadingVehicle() - safetyMarginPx, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - safetyMarginPx))
                     : p.getDistanceToStopLine();
 
             if (limitDist <= (3.0 * safeDistanceFactor)) {
@@ -355,17 +460,198 @@ public class EmergencyVehicleAgent extends Agent {
                 double decel = 0.11 / safeDistanceFactor;
                 targetSpd = Math.max(0.35, Math.min(effectiveMaxSpeed, Math.sqrt(2.0 * decel * limitDist)));
             }
+        } else if (p.isApproachingStopLine(stopLineThreshold) && !p.isLightGreen() && intersectionSafeForRedPriority) {
+            // Cruzamento verificado livre de tráfego perpendicular: avança com prioridade cautelosa
+            act = VehicleAction.CRUISE;
+            targetSpd = Math.min(effectiveMaxSpeed * 0.78, 2.2 * safeSpeedFactor);
         } else {
             act = VehicleAction.ACCELERATE;
             targetSpd = effectiveMaxSpeed;
         }
 
-        publicarDecisaoEmergencia(p, act, targetSpd, 1, "MISSAO_ATIVA_" + category);
+        publicarDecisaoEmergencia(p, act, targetSpd, 1, "MISSAO_ATIVA_" + category, useCentralCorridor);
     }
 
-    private void enviarPedidoPreempcao(NetworkTopologyConfig topo, int targetInterIdx, double approxDist, boolean isRetry) {
+    private void atualizarRotaAStarEmergencia(VehiclePerception p, NetworkTopologyConfig topo, CitySimulationGUI gui) {
+        int approachingIdx = p.getApproachingIntersection();
+        if (approachingIdx < 0 || approachingIdx >= topo.getIntersectionCount()) {
+            this.plannedIntent = CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
+            return;
+        }
+        RoadNetworkGraph graph = TrafficEnvironment.getInstance().getRoadGraph();
+        if (graph == null) return;
+
+        // Se já está em fase de saída do mapa pelo cruzamento de periferia de destino, mantém a saída até cruzar a fronteira
+        if (this.exitingMap) {
+            if (p.getDirection() == this.exitDirection || p.getDistanceToStopLine() < -40.0) {
+                this.plannedIntent = CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
+                if (gui != null) gui.setEmergencyExitingMap(getLocalName(), true);
+                return;
+            }
+            if (approachingIdx == this.destinationNode && this.exitDirection >= 0) {
+                this.plannedIntent = resolveTurnIntent(p.getDirection(), this.exitDirection);
+                if (gui != null) gui.setEmergencyExitingMap(getLocalName(), true);
+                return;
+            }
+            this.exitingMap = false;
+            this.exitDirection = -1;
+            if (gui != null) gui.setEmergencyExitingMap(getLocalName(), false);
+        }
+
+        boolean routeInvalid = (this.activeRoute == null)
+                || !this.activeRoute.reachable
+                || (this.routeGraphVersion != graph.getGraphVersion())
+                || !this.activeRoute.nodePath.contains(approachingIdx);
+
+        if (!routeInvalid && approachingIdx == this.destinationNode) {
+            // Chegou ao cruzamento de periferia de destino: inicia saída física do mapa (Opção 1)
+            int resolvedExit = resolveOffMapExitDirection(topo, approachingIdx, p.getDirection());
+            if (resolvedExit >= 0) {
+                this.exitingMap = true;
+                this.exitDirection = resolvedExit;
+                this.plannedIntent = resolveTurnIntent(p.getDirection(), resolvedExit);
+                if (gui != null) {
+                    gui.setEmergencyExitingMap(getLocalName(), true);
+                }
+                return;
+            }
+            // Fallback se o destino não fosse periférico: escolhe destino de periferia para sair do mapa
+            this.originNode = approachingIdx;
+            this.destinationNode = selectNextEmergencyDestination(graph, topo, approachingIdx, p.getDirection());
+            this.activeRoute = AStarPathfinder.findPathAStar(graph, this.originNode, this.destinationNode, p.getDirection(), heuristic);
+            this.routeGraphVersion = graph.getGraphVersion();
+            if (gui != null) {
+                gui.syncEmergencyVisualRoute(getLocalName(), this.originNode, this.destinationNode, this.activeRoute);
+            }
+        } else if (routeInvalid) {
+            this.originNode = approachingIdx;
+            int targetDest = this.destinationNode;
+            if (targetDest < 0 || targetDest >= topo.getIntersectionCount()
+                    || targetDest == approachingIdx || !isPerimeterNode(topo, targetDest)) {
+                targetDest = selectNextEmergencyDestination(graph, topo, approachingIdx, p.getDirection());
+            }
+            AStarPathfinder.RouteResult candidate = AStarPathfinder.findPathAStar(graph, approachingIdx, targetDest, p.getDirection(), heuristic);
+            if (!candidate.reachable) {
+                targetDest = selectNextEmergencyDestination(graph, topo, approachingIdx, p.getDirection());
+                candidate = AStarPathfinder.findPathAStar(graph, approachingIdx, targetDest, p.getDirection(), heuristic);
+            }
+            this.destinationNode = targetDest;
+            this.activeRoute = candidate;
+            this.routeGraphVersion = graph.getGraphVersion();
+            if (gui != null) {
+                gui.syncEmergencyVisualRoute(getLocalName(), this.originNode, this.destinationNode, this.activeRoute);
+            }
+        }
+
+        if (this.activeRoute != null && this.activeRoute.reachable) {
+            this.plannedIntent = this.activeRoute.getManeuverForIntersection(approachingIdx);
+        } else {
+            this.plannedIntent = CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
+        }
+    }
+
+    private boolean isPerimeterNode(NetworkTopologyConfig topo, int nodeIdx) {
+        if (!topo.isValidIntersection(nodeIdx)) return false;
+        int r = topo.getRow(nodeIdx);
+        int c = topo.getCol(nodeIdx);
+        return (r == 0 || r == topo.getRows() - 1 || c == 0 || c == topo.getCols() - 1);
+    }
+
+    private int resolveOffMapExitDirection(NetworkTopologyConfig topo, int nodeIdx, int currentDir) {
+        if (!isPerimeterNode(topo, nodeIdx)) return -1;
+        int r = topo.getRow(nodeIdx);
+        int c = topo.getCol(nodeIdx);
+        int oppositeDir;
+        switch (currentDir) {
+            case 0: oppositeDir = 1; break;
+            case 1: oppositeDir = 0; break;
+            case 2: oppositeDir = 3; break;
+            default: oppositeDir = 2; break;
+        }
+        int[] candidateDirs = new int[4];
+        int n = 0;
+        if (r == 0) candidateDirs[n++] = 1;                    // Sai para Norte (margem superior)
+        if (r == topo.getRows() - 1) candidateDirs[n++] = 0;   // Sai para Sul (margem inferior)
+        if (c == 0) candidateDirs[n++] = 3;                    // Sai para Oeste (margem esquerda)
+        if (c == topo.getCols() - 1) candidateDirs[n++] = 2;   // Sai para Este (margem direita)
+
+        // Prefere seguir em frente se a direção atual já sai do mapa; caso contrário vira para a saída válida sem inversão
+        for (int i = 0; i < n; i++) {
+            if (candidateDirs[i] == currentDir) {
+                return candidateDirs[i];
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            if (candidateDirs[i] != oppositeDir) {
+                return candidateDirs[i];
+            }
+        }
+        return -1;
+    }
+
+    private CitySimulationGUI.ManeuverIntent resolveTurnIntent(int fromDir, int toDir) {
+        if (fromDir == toDir) return CitySimulationGUI.ManeuverIntent.GO_STRAIGHT;
+        boolean isRight = (fromDir == 0 && toDir == 3)
+                || (fromDir == 1 && toDir == 2)
+                || (fromDir == 2 && toDir == 0)
+                || (fromDir == 3 && toDir == 1);
+        return isRight ? CitySimulationGUI.ManeuverIntent.TURN_RIGHT : CitySimulationGUI.ManeuverIntent.TURN_LEFT;
+    }
+
+    private int selectNextEmergencyDestination(RoadNetworkGraph graph, NetworkTopologyConfig topo, int fromNode, int currentDir) {
+        int count = topo.getIntersectionCount();
+        int fromRow = topo.getRow(fromNode);
+        int fromCol = topo.getCol(fromNode);
+        int seed = Math.abs(getLocalName().hashCode() + completedRoutesCount * 7 + currentDir * 3);
+
+        int bestFallback = (fromNode + 1) % count;
+        int bestPerimeterShort = -1;
+        int bestPerimeterTurn = -1;
+
+        for (int attempt = 0; attempt < count; attempt++) {
+            int cand = (fromNode + 1 + ((seed + attempt * 5) % (count - 1))) % count;
+            if (cand == fromNode) continue;
+            AStarPathfinder.RouteResult res = AStarPathfinder.findPathAStar(graph, fromNode, cand, currentDir, heuristic);
+            if (!res.reachable || res.nodePath.size() < 2) continue;
+            bestFallback = cand;
+            if (!isPerimeterNode(topo, cand)) continue;
+            // Prefere destinos de periferia noutra linha e coluna (>= 3 nós) para atravessar a cidade com viragens antes de sair do mapa
+            boolean differentCorridor = (topo.getRow(cand) != fromRow) && (topo.getCol(cand) != fromCol);
+            if (differentCorridor && res.nodePath.size() >= 3) {
+                return cand;
+            }
+            if (bestPerimeterTurn < 0 && (topo.getRow(cand) != fromRow || topo.getCol(cand) != fromCol)) {
+                bestPerimeterTurn = cand;
+            }
+            if (bestPerimeterShort < 0) {
+                bestPerimeterShort = cand;
+            }
+        }
+        if (bestPerimeterTurn >= 0) return bestPerimeterTurn;
+        return (bestPerimeterShort >= 0) ? bestPerimeterShort : bestFallback;
+    }
+
+    private int[] resolveNextRouteHop(NetworkTopologyConfig topo, int currentInterIdx, int currentDir) {
+        if (this.activeRoute != null && this.activeRoute.reachable && this.activeRoute.nodePath != null) {
+            List<Integer> nodes = this.activeRoute.nodePath;
+            List<RoadNetworkGraph.RoadSegment> segs = this.activeRoute.segmentPath;
+            for (int i = 0; i < nodes.size() - 1; i++) {
+                if (nodes.get(i) == currentInterIdx && i < segs.size()) {
+                    int nextNode = nodes.get(i + 1);
+                    int segDir = segs.get(i).direction;
+                    int nextAxis = (segDir == 0 || segDir == 1) ? 0 : 1;
+                    return new int[] { nextNode, nextAxis };
+                }
+            }
+        }
+        int adj = getAdjacentCorridorIntersection(topo, currentInterIdx, currentDir);
+        int curAxis = (currentDir == 0 || currentDir == 1) ? 0 : 1;
+        return new int[] { adj, curAxis };
+    }
+
+    private void enviarPedidoPreempcao(NetworkTopologyConfig topo, int targetInterIdx, int targetAxis, double approxDist, boolean isRetry) {
         String crossingName = topo.getIntersectionName(targetInterIdx);
-        String targetSemName = "Semaforo_" + (axis == 0 ? "NS" : "EW") + "_" + crossingName;
+        String targetSemName = "Semaforo_" + (targetAxis == 0 ? "NS" : "EW") + "_" + crossingName;
 
         ACLMessage msg = new ACLMessage(ACLMessage.REQUEST);
         msg.addReceiver(new AID(targetSemName, AID.ISLOCALNAME));
@@ -382,7 +668,7 @@ public class EmergencyVehicleAgent extends Agent {
             msg.setContent("PREEMPCAO_SOCORRO: Viatura " + getLocalName()
                     + " (Cat=" + category + ", Urg=" + urgencyLevel + ", Mis=" + mission.getMissionId()
                     + ") em missao urgente no Cruzamento " + crossingName
-                    + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
+                    + " (Eixo " + (targetAxis == 0 ? "NS" : "EW") + ").");
         }
         send(msg);
         TrafficMetricsCollector.getInstance().recordFipaMessage();
@@ -467,10 +753,14 @@ public class EmergencyVehicleAgent extends Agent {
         }
     }
 
-    private void publicarDecisaoEmergencia(VehiclePerception p, VehicleAction action, double targetSpeed, int desiredLane, String state) {
+    private void publicarDecisaoEmergencia(VehiclePerception p, VehicleAction action, double targetSpeed,
+                                           int desiredLane, String state, boolean useCentralCorridor) {
         this.decisionSequence++;
         long now = System.currentTimeMillis();
         long validUntil = now + VehicleControlGateway.DEFAULT_MAX_STALENESS_MS;
+
+        List<Integer> routeNodes = (this.activeRoute != null && this.activeRoute.reachable)
+                ? this.activeRoute.nodePath : Collections.emptyList();
 
         VehicleDecision dec = new VehicleDecision(
                 getLocalName(),
@@ -479,14 +769,18 @@ public class EmergencyVehicleAgent extends Agent {
                 validUntil,
                 action,
                 targetSpeed,
-                CitySimulationGUI.ManeuverIntent.GO_STRAIGHT,
+                this.plannedIntent,
                 desiredLane,
-                p.getApproachingIntersection(),
-                -1,
-                Collections.emptyList(),
+                this.originNode,
+                this.destinationNode,
+                routeNodes,
                 state,
-                "Emergencia em curso: " + state,
-                true
+                "Emergencia em curso: " + state + " (" + this.plannedIntent + (useCentralCorridor ? " | CORREDOR_CENTRAL" : "") + ")",
+                true,
+                environment.VehicleYieldState.NORMAL_DRIVING,
+                null,
+                0.0,
+                useCentralCorridor
         );
 
         VehicleControlGateway.getInstance().publishDecision(dec);
@@ -534,13 +828,14 @@ public class EmergencyVehicleAgent extends Agent {
         }
     }
 
-    private void notificarDesimpedimento(int interIdx) {
+    private void notificarDesimpedimento(int interIdx, int targetAxis) {
         NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
         if (interIdx < 0 || interIdx >= topo.getIntersectionCount()) return;
 
+        int resolvedAxis = (targetAxis == 0 || targetAxis == 1) ? targetAxis : this.axis;
         String crossingName = topo.getIntersectionName(interIdx);
-        String targetSemName = "Semaforo_" + (axis == 0 ? "NS" : "EW") + "_" + crossingName;
-        System.out.println("[EmergencyVehicleAgent - " + getLocalName() 
+        String targetSemName = "Semaforo_" + (resolvedAxis == 0 ? "NS" : "EW") + "_" + crossingName;
+        System.out.println("[EmergencyVehicleAgent - " + getLocalName()
                 + "] Cruzamento " + crossingName + " desimpedido. A emitir FIPA INFORM...");
 
         ACLMessage clearedMsg = new ACLMessage(ACLMessage.INFORM);
@@ -552,7 +847,7 @@ public class EmergencyVehicleAgent extends Agent {
         send(clearedMsg);
         TrafficMetricsCollector.getInstance().recordFipaMessage();
 
-        // Notifica também os veículos normais com EMERGENCY_PASSED
+        // Notifica também os veículos normais no eixo atravessado com EMERGENCY_PASSED
         ACLMessage passedMsg = new ACLMessage(ACLMessage.INFORM);
         passedMsg.setOntology("emergency-yield");
         passedMsg.setConversationId("emerg-passed-" + getLocalName() + "-" + interIdx);
@@ -561,7 +856,8 @@ public class EmergencyVehicleAgent extends Agent {
         CitySimulationGUI gui = CitySimulationGUI.peekInstance();
         if (gui != null) {
             for (CitySimulationGUI.VisualVehicle vv : gui.getVisualVehiclesSnapshot()) {
-                if (!vv.isEmergency && vv.direction == this.visualDirection) {
+                int vvAxis = (vv.direction == 0 || vv.direction == 1) ? 0 : 1;
+                if (!vv.isEmergency && (vv.direction == this.visualDirection || vvAxis == resolvedAxis)) {
                     passedMsg.addReceiver(new AID(vv.id, AID.ISLOCALNAME));
                 }
             }

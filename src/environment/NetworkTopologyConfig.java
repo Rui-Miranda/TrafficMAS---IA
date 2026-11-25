@@ -46,6 +46,8 @@ public final class NetworkTopologyConfig {
     public static final double VEHICLE_HALF_LENGTH_PX = VEHICLE_LENGTH_PX / 2.0; // 13.0 px
     /** Folga total do centro do veículo face ao eixo da stop line (13.0px frente + 2.5px meia-largura da linha e margem) */
     public static final double STOP_LINE_BUMPER_OFFSET_PX = VEHICLE_HALF_LENGTH_PX + 2.5; // 15.5 px
+    /** Desvio lateral máximo (px) para abertura do Corredor de Emergência (18px centro-a-centro; 4px de asfalto livre de cada lado!) */
+    public static final double CORRIDOR_YIELD_OFFSET_PX = 6.0;
 
     /** Configuração oficial 2×2 (4 cruzamentos — Compatibilidade Fases 1 a 5.2) */
     public static final NetworkTopologyConfig CONFIG_2X2 = new NetworkTopologyConfig(
@@ -470,6 +472,48 @@ public final class NetworkTopologyConfig {
             default:
                 return 0.0;
         }
+    }
+
+    /**
+     * Devolve a coordenada transversal do eixo central do Corredor de Emergência
+     * (linha tracejada exatamente entre a via exterior/direita e a via interior/esquerda do mesmo sentido).
+     */
+    public double getEmergencyCorridorCoordinate(int corridorIndex, int direction) {
+        switch (direction) {
+            case 0: return getRoadX(corridorIndex) + 1.0 * laneWidth; // roadX + 24 px
+            case 1: return getRoadX(corridorIndex) + 3.0 * laneWidth; // roadX + 72 px
+            case 2: return getRoadY(corridorIndex) + 3.0 * laneWidth; // roadY + 72 px
+            case 3: return getRoadY(corridorIndex) + 1.0 * laneWidth; // roadY + 24 px
+            default: return 0.0;
+        }
+    }
+
+    /**
+     * Calcula o offset lateral com sinal (em px no eixo transversal X ou Y) para abertura do Corredor de Emergência:
+     * - Via exterior/direita (lane 0): encosta ao limite exterior/berma da via (sem sair dos 96px).
+     * - Via interior/esquerda (lane 1): encosta ao separador central/linha dupla amarela (sem invadir sentido contrário).
+     */
+    public double getYieldLateralOffsetPx(int direction, int laneIndex) {
+        switch (direction) {
+            case 0: // N->S: lane 0 (12) -> 7 (-5); lane 1 (36) -> 41 (+5)
+                return (laneIndex == 0) ? -CORRIDOR_YIELD_OFFSET_PX : +CORRIDOR_YIELD_OFFSET_PX;
+            case 1: // S->N: lane 0 (84) -> 89 (+5); lane 1 (60) -> 55 (-5)
+                return (laneIndex == 0) ? +CORRIDOR_YIELD_OFFSET_PX : -CORRIDOR_YIELD_OFFSET_PX;
+            case 2: // W->E: lane 0 (84) -> 89 (+5); lane 1 (60) -> 55 (-5)
+                return (laneIndex == 0) ? +CORRIDOR_YIELD_OFFSET_PX : -CORRIDOR_YIELD_OFFSET_PX;
+            case 3: // E->W: lane 0 (12) -> 7 (-5); lane 1 (36) -> 41 (+5)
+                return (laneIndex == 0) ? -CORRIDOR_YIELD_OFFSET_PX : +CORRIDOR_YIELD_OFFSET_PX;
+            default:
+                return 0.0;
+        }
+    }
+
+    /**
+     * Devolve a coordenada transversal alvo de um veículo regular em estado YIELDING_EMERGENCY.
+     */
+    public double getYieldTargetCoordinate(int corridorIndex, int direction, int laneIndex) {
+        return getLaneCenterCoordinate(corridorIndex, direction, laneIndex)
+                + getYieldLateralOffsetPx(direction, laneIndex);
     }
 
     /**

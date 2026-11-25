@@ -18,6 +18,9 @@ public enum VehicleYieldState {
     /** Avaliação deliberativa das condições físicas de segurança para manobra lateral */
     EVALUATING_YIELD,
 
+    /** Abertura do Corredor de Emergência (Código da Estrada): faixa 1 encosta à esquerda, faixa 0 encosta à direita */
+    YIELDING_EMERGENCY,
+
     /** Execução física gradual de mudança de faixa para a direita (lane 1 -> lane 0) */
     YIELDING_RIGHT,
 
@@ -47,6 +50,6 @@ public enum VehicleYieldState {
      * Indica se o veículo concluiu a cedência e libertou fisicamente a trajetória prioritária.
      */
     public boolean isCorridorFreed() {
-        return this == YIELDING_STOPPED || this == WAITING_FOR_EMERGENCY_PASSAGE;
+        return this == YIELDING_EMERGENCY || this == YIELDING_STOPPED || this == WAITING_FOR_EMERGENCY_PASSAGE;
     }
 }

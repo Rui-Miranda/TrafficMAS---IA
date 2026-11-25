@@ -35,16 +35,19 @@ public class VehicleDecision implements Serializable {
     private final String statusExplanation;
     private final boolean requestFipaPriority;
 
-    // Campos de Cedência Física e Cooperação Multiagente (Fase 6.3)
+    // Campos de Cedência Física e Cooperação Multiagente (Fase 6.3 / Corredor de Emergência)
     private final VehicleYieldState yieldState;
     private final String yieldTargetVehicleId;
+    private final double desiredLateralOffsetPx;
+    private final boolean useCentralCorridor;
 
     public VehicleDecision(String vehicleId, long decisionSequence, long timestampMillis, long validUntilMillis,
                            VehicleAction action, double targetSpeed,
                            CitySimulationGUI.ManeuverIntent plannedIntent, int desiredLane,
                            int originNode, int destinationNode, List<Integer> activeRouteNodes,
                            String drivingState, String statusExplanation, boolean requestFipaPriority,
-                           VehicleYieldState yieldState, String yieldTargetVehicleId) {
+                           VehicleYieldState yieldState, String yieldTargetVehicleId,
+                           double desiredLateralOffsetPx, boolean useCentralCorridor) {
         this.vehicleId = vehicleId;
         this.decisionSequence = decisionSequence;
         this.timestampMillis = timestampMillis;
@@ -63,6 +66,20 @@ public class VehicleDecision implements Serializable {
         this.requestFipaPriority = requestFipaPriority;
         this.yieldState = (yieldState != null) ? yieldState : VehicleYieldState.NORMAL_DRIVING;
         this.yieldTargetVehicleId = yieldTargetVehicleId;
+        this.desiredLateralOffsetPx = desiredLateralOffsetPx;
+        this.useCentralCorridor = useCentralCorridor;
+    }
+
+    public VehicleDecision(String vehicleId, long decisionSequence, long timestampMillis, long validUntilMillis,
+                           VehicleAction action, double targetSpeed,
+                           CitySimulationGUI.ManeuverIntent plannedIntent, int desiredLane,
+                           int originNode, int destinationNode, List<Integer> activeRouteNodes,
+                           String drivingState, String statusExplanation, boolean requestFipaPriority,
+                           VehicleYieldState yieldState, String yieldTargetVehicleId) {
+        this(vehicleId, decisionSequence, timestampMillis, validUntilMillis, action, targetSpeed,
+             plannedIntent, desiredLane, originNode, destinationNode, activeRouteNodes,
+             drivingState, statusExplanation, requestFipaPriority,
+             yieldState, yieldTargetVehicleId, 0.0, false);
     }
 
     /**
@@ -182,6 +199,14 @@ public class VehicleDecision implements Serializable {
 
     public String getYieldTargetVehicleId() {
         return yieldTargetVehicleId;
+    }
+
+    public double getDesiredLateralOffsetPx() {
+        return desiredLateralOffsetPx;
+    }
+
+    public boolean isUseCentralCorridor() {
+        return useCentralCorridor;
     }
 
     public boolean isYielding() {
