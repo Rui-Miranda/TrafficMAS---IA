@@ -38,6 +38,14 @@ public final class NetworkTopologyConfig {
 
     public static final int DEFAULT_ROAD_WIDTH = 96;
     public static final int DEFAULT_LANE_WIDTH = DEFAULT_ROAD_WIDTH / 4; // 24 px
+    /** Comprimento visual/físico padrão de cada veículo (px) */
+    public static final double VEHICLE_LENGTH_PX = 26.0;
+    /** Largura visual/física padrão de cada veículo (px) */
+    public static final double VEHICLE_WIDTH_PX = 14.0;
+    /** Distância do centro geométrico do veículo até ao para-choques dianteiro (px) */
+    public static final double VEHICLE_HALF_LENGTH_PX = VEHICLE_LENGTH_PX / 2.0; // 13.0 px
+    /** Folga total do centro do veículo face ao eixo da stop line (13.0px frente + 2.5px meia-largura da linha e margem) */
+    public static final double STOP_LINE_BUMPER_OFFSET_PX = VEHICLE_HALF_LENGTH_PX + 2.5; // 15.5 px
 
     /** Configuração oficial 2×2 (4 cruzamentos — Compatibilidade Fases 1 a 5.2) */
     public static final NetworkTopologyConfig CONFIG_2X2 = new NetworkTopologyConfig(
@@ -406,6 +414,34 @@ public final class NetworkTopologyConfig {
 
             default:
                 return 9999.0;
+        }
+    }
+
+    /**
+     * Calcula a distância longitudinal (em píxeis) entre o para-choques dianteiro do veículo
+     * e a margem anterior da linha de paragem (stop line) do próximo cruzamento.
+     * Valor >= 0 indica que a frente do veículo ainda não transpôs a linha de paragem.
+     */
+    public double getBumperDistanceToTargetStopLine(double x, double y, int direction) {
+        return getDistanceToTargetStopLine(x, y, direction) - STOP_LINE_BUMPER_OFFSET_PX;
+    }
+
+    /**
+     * Calcula a distância longitudinal (em píxeis) do centro do veículo até à linha de paragem
+     * de um cruzamento específico.
+     */
+    public double getDistanceToIntersectionStopLine(int intersectionIndex, double x, double y, int direction) {
+        if (!isValidIntersection(intersectionIndex)) {
+            return 9999.0;
+        }
+        int ix = getIntersectionX(intersectionIndex);
+        int iy = getIntersectionY(intersectionIndex);
+        switch (direction) {
+            case 0: return (iy - 2.0) - y;
+            case 1: return y - (iy + roadWidth + 2.0);
+            case 2: return (ix - 2.0) - x;
+            case 3: return x - (ix + roadWidth + 2.0);
+            default: return 9999.0;
         }
     }
 

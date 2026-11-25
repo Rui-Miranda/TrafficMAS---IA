@@ -61,6 +61,7 @@ public class EmergencyVehicleAgent extends Agent {
     private EmergencyMission mission;
 
     private int currentTargetIntersection = -1;
+    private int lookaheadTargetIntersection = -1;
     private VehicleCrossingState crossingState = VehicleCrossingState.APROXIMACAO;
     private long lastRequestSentMillis = 0;
     private long lastYieldRequestSentMillis = 0;
@@ -132,7 +133,7 @@ public class EmergencyVehicleAgent extends Agent {
                 + ", MissaoId=" + mission.getMissionId() + ") pronta no corredor " + road + ".");
 
         // 4. Comportamento Periódico Deliberativo (Perceção -> Decisão -> FIPA)
-        addBehaviour(new TickerBehaviour(this, 100) {
+        addBehaviour(new TickerBehaviour(this, 60) {
             private static final long serialVersionUID = 1L;
             @Override
             protected void onTick() {
@@ -224,7 +225,7 @@ public class EmergencyVehicleAgent extends Agent {
             CitySimulationGUI.VisualVehicle vv = gui.getVisualVehicle(getLocalName());
             if (vv != null) {
                 int nextInter = topo.getTargetIntersection(vv.x, vv.y, vv.direction);
-                double distStop = topo.getDistanceToTargetStopLine(vv.x, vv.y, vv.direction);
+                double distStop = topo.getBumperDistanceToTargetStopLine(vv.x, vv.y, vv.direction);
                 p = new VehiclePerception(
                         getLocalName(), vv.x, vv.y, vv.currentSpeed, vv.maxSpeed,
                         vv.direction, vv.laneIndex, vv.inIntersection, nextInter, distStop,
@@ -250,54 +251,77 @@ public class EmergencyVehicleAgent extends Agent {
         }
 
         // 1. Deteção e Comunicação FIPA de Cedência com Veículos à Frente (Ontologia emergency-yield)
-        if (p.hasLeadingObstacle(110.0) && (now - lastYieldRequestSentMillis > 1500L)) {
+        if (p.hasLeadingObstacle(200.0) && (now - lastYieldRequestSentMillis > 900L)) {
             lastYieldRequestSentMillis = now;
             emitirYieldRequestParaLideres(p, topo);
         }
 
-        // 2. Preempção Semafórica Segura
+        // 2. Preempção Semafórica Segura com Onda Verde Antecipada (Lookahead no corredor)
         if (interIdx >= 0 && interIdx < topo.getIntersectionCount()) {
-            String crossingName = topo.getIntersectionName(interIdx);
-            if (distToStop >= 0 && distToStop <= 240.0 && (currentTargetIntersection != interIdx || crossingState == VehicleCrossingState.APROXIMACAO)) {
+            // Se saiu completamente do último cruzamento do corredor (rumo ao wrap-around), liberta-o de imediato
+            if (distToStop < -96.0 && currentTargetIntersection == interIdx) {
+                notificarDesimpedimento(currentTargetIntersection);
+                currentTargetIntersection = -1;
+                crossingState = VehicleCrossingState.APROXIMACAO;
+            }
+
+            if (distToStop >= 0.0 && distToStop <= 360.0
+                    && (currentTargetIntersection != interIdx || crossingState == VehicleCrossingState.APROXIMACAO)) {
                 if (currentTargetIntersection >= 0 && currentTargetIntersection != interIdx) {
                     notificarDesimpedimento(currentTargetIntersection);
                 }
                 currentTargetIntersection = interIdx;
-                crossingState = VehicleCrossingState.PEDIDO_ENVIADO;
+                if (lookaheadTargetIntersection == interIdx) {
+                    // O pedido antecipado de onda verde já foi enviado para este cruzamento;
+                    // se ainda não estiver verde, reforça o pedido (idempotente) para garantir preempção ativa
+                    lookaheadTargetIntersection = -1;
+                    lastRequestSentMillis = now;
+                    if (p.isLightGreen()) {
+                        crossingState = VehicleCrossingState.PASSAGEM_SEGURA;
+                    } else {
+                        enviarPedidoPreempcao(topo, interIdx, distToStop, false);
+                        crossingState = VehicleCrossingState.AGUARDA_VERDE;
+                    }
+                } else {
+                    crossingState = VehicleCrossingState.PEDIDO_ENVIADO;
+                    lastRequestSentMillis = now;
+                    enviarPedidoPreempcao(topo, interIdx, distToStop, false);
+                    crossingState = p.isLightGreen() ? VehicleCrossingState.PASSAGEM_SEGURA : VehicleCrossingState.AGUARDA_VERDE;
+                }
+            } else if (crossingState == VehicleCrossingState.AGUARDA_VERDE
+                    && !p.isLightGreen()
+                    && (now - lastRequestSentMillis > 1000L)
+                    && distToStop >= 0.0 && distToStop <= 360.0) {
                 lastRequestSentMillis = now;
+                enviarPedidoPreempcao(topo, interIdx, distToStop, true);
+            }
 
-                String targetSemName = "Semaforo_" + (axis == 0 ? "NS" : "EW") + "_" + crossingName;
-
-                System.out.println("[EmergencyVehicleAgent - " + getLocalName() 
-                        + "] A enviar REQUEST de preempção a " + targetSemName 
-                        + " (Distância: " + (int)distToStop + "px | Urgência: " + urgencyLevel + ")");
-
-                ACLMessage request = new ACLMessage(ACLMessage.REQUEST);
-                request.addReceiver(new AID(targetSemName, AID.ISLOCALNAME));
-                request.setOntology("emergency-preemption");
-                request.setConversationId("emerg-req-" + getLocalName() + "-" + interIdx);
-                request.setContent("PREEMPCAO_SOCORRO: Viatura " + getLocalName() 
-                        + " (Cat=" + category + ", Urg=" + urgencyLevel + ", Mis=" + mission.getMissionId()
-                        + ") em missao urgente no Cruzamento " + crossingName 
-                        + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
-
-                send(request);
-                TrafficMetricsCollector.getInstance().recordFipaMessage();
-                crossingState = VehicleCrossingState.AGUARDA_VERDE;
-            } else if (crossingState == VehicleCrossingState.AGUARDA_VERDE && (now - lastRequestSentMillis > 3000L) && distToStop >= 0 && distToStop <= 240.0) {
-                lastRequestSentMillis = now;
-                String targetSemName = "Semaforo_" + (axis == 0 ? "NS" : "EW") + "_" + crossingName;
-                ACLMessage retry = new ACLMessage(ACLMessage.REQUEST);
-                retry.addReceiver(new AID(targetSemName, AID.ISLOCALNAME));
-                retry.setOntology("emergency-preemption");
-                retry.setConversationId("emerg-retry-" + getLocalName() + "-" + interIdx);
-                retry.setContent("RETRY_PREEMPCAO: Viatura " + getLocalName() + " (Cat=" + category + ", Urg=" + urgencyLevel + ") aguarda concessao de verde.");
-                send(retry);
-                TrafficMetricsCollector.getInstance().recordFipaMessage();
+            // Onda verde antecipada: solicita preempção segura ao cruzamento adjacente seguinte do corredor
+            // ~3-3.5s antes da chegada para que YELLOW (1.5s) + ALL_RED (1.0s) terminem antes da stop line
+            int adjacentDownstream = getAdjacentCorridorIntersection(topo, interIdx, visualDirection);
+            if (adjacentDownstream >= 0 && distToStop >= -20.0 && distToStop <= 155.0) {
+                if (adjacentDownstream != lookaheadTargetIntersection) {
+                    if (lookaheadTargetIntersection >= 0 && lookaheadTargetIntersection != currentTargetIntersection) {
+                        notificarDesimpedimento(lookaheadTargetIntersection);
+                    }
+                    lookaheadTargetIntersection = adjacentDownstream;
+                    enviarPedidoPreempcao(topo, adjacentDownstream, Math.max(0.0, distToStop) + 215.0, false);
+                }
+            } else if (adjacentDownstream < 0 && distToStop < -96.0 && isNearWrapBoundary(topo, p.getX(), p.getY(), visualDirection, 110.0)) {
+                // Após sair do último cruzamento do corredor e já perto da fronteira de wrap-around (~3s do 1.º cruzamento),
+                // antecipa a onda verde para o primeiro cruzamento de entrada do mesmo corredor
+                int wrapEntryIdx = getWrapEntryIntersection(topo, interIdx, visualDirection);
+                if (wrapEntryIdx >= 0 && wrapEntryIdx != interIdx && wrapEntryIdx != lookaheadTargetIntersection) {
+                    if (lookaheadTargetIntersection >= 0 && lookaheadTargetIntersection != currentTargetIntersection) {
+                        notificarDesimpedimento(lookaheadTargetIntersection);
+                    }
+                    lookaheadTargetIntersection = wrapEntryIdx;
+                    enviarPedidoPreempcao(topo, wrapEntryIdx, 260.0, false);
+                }
             }
 
             if ((crossingState == VehicleCrossingState.PASSAGEM_SEGURA || crossingState == VehicleCrossingState.ATRAVESSANDO)
-                    && (distToStop > 260.0 || currentTargetIntersection != interIdx)) {
+                    && (distToStop > 380.0 || currentTargetIntersection != interIdx)) {
                 notificarDesimpedimento(currentTargetIntersection >= 0 ? currentTargetIntersection : interIdx);
                 crossingState = VehicleCrossingState.APROXIMACAO;
                 currentTargetIntersection = -1;
@@ -309,27 +333,27 @@ public class EmergencyVehicleAgent extends Agent {
         double safeDistanceFactor = (p.getRoadCondition() != null) ? p.getRoadCondition().getSafeDistanceFactor() : 1.0;
         double effectiveMaxSpeed = p.getMaxSpeed() * safeSpeedFactor;
 
-        double baseObstacleThreshold = 36.0 * safeDistanceFactor;
-        double stopLineThreshold = Math.max(65.0, 65.0 * safeDistanceFactor);
+        double baseObstacleThreshold = 34.0 * safeDistanceFactor;
+        double stopLineThreshold = Math.max(55.0, 55.0 * safeDistanceFactor);
 
         boolean obstacleAhead = p.hasLeadingObstacle(baseObstacleThreshold);
-        boolean redLightAhead = p.isApproachingStopLine(stopLineThreshold) && !p.isLightGreen() && crossingState != VehicleCrossingState.PASSAGEM_SEGURA;
+        boolean redLightAhead = p.isApproachingStopLine(stopLineThreshold) && !p.isLightGreen();
         VehicleAction act;
         double targetSpd;
 
         if (obstacleAhead || redLightAhead) {
-            double safetyMarginPx = 32.0 * safeDistanceFactor;
+            double safetyMarginPx = 31.0 * safeDistanceFactor;
             double limitDist = obstacleAhead
                     ? (redLightAhead ? Math.min(p.getDistanceToLeadingVehicle() - safetyMarginPx, p.getDistanceToStopLine()) : (p.getDistanceToLeadingVehicle() - safetyMarginPx))
                     : p.getDistanceToStopLine();
 
-            if (limitDist <= (3.5 * safeDistanceFactor)) {
+            if (limitDist <= (3.0 * safeDistanceFactor)) {
                 act = VehicleAction.STOP;
                 targetSpd = 0.0;
             } else {
                 act = VehicleAction.BRAKE;
-                double rampDist = 45.0 * safeDistanceFactor;
-                targetSpd = Math.max(0.0, (limitDist / rampDist) * effectiveMaxSpeed);
+                double decel = 0.11 / safeDistanceFactor;
+                targetSpd = Math.max(0.35, Math.min(effectiveMaxSpeed, Math.sqrt(2.0 * decel * limitDist)));
             }
         } else {
             act = VehicleAction.ACCELERATE;
@@ -337,6 +361,67 @@ public class EmergencyVehicleAgent extends Agent {
         }
 
         publicarDecisaoEmergencia(p, act, targetSpd, 1, "MISSAO_ATIVA_" + category);
+    }
+
+    private void enviarPedidoPreempcao(NetworkTopologyConfig topo, int targetInterIdx, double approxDist, boolean isRetry) {
+        String crossingName = topo.getIntersectionName(targetInterIdx);
+        String targetSemName = "Semaforo_" + (axis == 0 ? "NS" : "EW") + "_" + crossingName;
+
+        ACLMessage msg = new ACLMessage(ACLMessage.REQUEST);
+        msg.addReceiver(new AID(targetSemName, AID.ISLOCALNAME));
+        msg.setOntology("emergency-preemption");
+        if (isRetry) {
+            msg.setConversationId("emerg-retry-" + getLocalName() + "-" + targetInterIdx);
+            msg.setContent("RETRY_PREEMPCAO: Viatura " + getLocalName()
+                    + " (Cat=" + category + ", Urg=" + urgencyLevel + ") aguarda concessao de verde.");
+        } else {
+            System.out.println("[EmergencyVehicleAgent - " + getLocalName()
+                    + "] A enviar REQUEST de preempção a " + targetSemName
+                    + " (Distância: " + (int) approxDist + "px | Urgência: " + urgencyLevel + ")");
+            msg.setConversationId("emerg-req-" + getLocalName() + "-" + targetInterIdx);
+            msg.setContent("PREEMPCAO_SOCORRO: Viatura " + getLocalName()
+                    + " (Cat=" + category + ", Urg=" + urgencyLevel + ", Mis=" + mission.getMissionId()
+                    + ") em missao urgente no Cruzamento " + crossingName
+                    + " (Eixo " + (axis == 0 ? "NS" : "EW") + ").");
+        }
+        send(msg);
+        TrafficMetricsCollector.getInstance().recordFipaMessage();
+    }
+
+    private int getAdjacentCorridorIntersection(NetworkTopologyConfig topo, int currentInterIdx, int dir) {
+        if (!topo.isValidIntersection(currentInterIdx)) return -1;
+        int r = topo.getRow(currentInterIdx);
+        int c = topo.getCol(currentInterIdx);
+        switch (dir) {
+            case 0: return (r + 1 < topo.getRows()) ? topo.getIntersectionIndex(r + 1, c) : -1;
+            case 1: return (r - 1 >= 0) ? topo.getIntersectionIndex(r - 1, c) : -1;
+            case 2: return (c + 1 < topo.getCols()) ? topo.getIntersectionIndex(r, c + 1) : -1;
+            case 3: return (c - 1 >= 0) ? topo.getIntersectionIndex(r, c - 1) : -1;
+            default: return -1;
+        }
+    }
+
+    private int getWrapEntryIntersection(NetworkTopologyConfig topo, int currentInterIdx, int dir) {
+        if (!topo.isValidIntersection(currentInterIdx)) return -1;
+        int r = topo.getRow(currentInterIdx);
+        int c = topo.getCol(currentInterIdx);
+        switch (dir) {
+            case 0: return topo.getIntersectionIndex(0, c);
+            case 1: return topo.getIntersectionIndex(topo.getRows() - 1, c);
+            case 2: return topo.getIntersectionIndex(r, 0);
+            case 3: return topo.getIntersectionIndex(r, topo.getCols() - 1);
+            default: return -1;
+        }
+    }
+
+    private boolean isNearWrapBoundary(NetworkTopologyConfig topo, double x, double y, int dir, double thresholdPx) {
+        switch (dir) {
+            case 0: return (topo.getWorldHeight() + 25.0 - y) <= thresholdPx;
+            case 1: return (y + 35.0) <= thresholdPx;
+            case 2: return (topo.getWorldWidth() + 25.0 - x) <= thresholdPx;
+            case 3: return (x + 35.0) <= thresholdPx;
+            default: return false;
+        }
     }
 
     private void emitirYieldRequestParaLideres(VehiclePerception p, NetworkTopologyConfig topo) {
@@ -367,7 +452,7 @@ public class EmergencyVehicleAgent extends Agent {
                 case 3: if (other.x < p.getX()) distAhead = p.getX() - other.x; break;
             }
 
-            if (distAhead > 5.0 && distAhead < 140.0) {
+            if (distAhead > 5.0 && distAhead < 260.0) {
                 ACLMessage yieldReq = new ACLMessage(ACLMessage.REQUEST);
                 yieldReq.addReceiver(new AID(other.id, AID.ISLOCALNAME));
                 yieldReq.setOntology("emergency-yield");
@@ -438,9 +523,14 @@ public class EmergencyVehicleAgent extends Agent {
         }
 
         if (content != null && content.contains("VERDE_CONCEDIDO")) {
-            System.out.println("[EmergencyVehicleAgent - " + getLocalName() + "] >>> Confirmação 3/3 (VERDE CONCEDIDO)! " 
-                    + "Passagem segura garantida pelo semáforo " + msg.getSender().getLocalName());
-            this.crossingState = VehicleCrossingState.PASSAGEM_SEGURA;
+            String senderName = msg.getSender().getLocalName();
+            System.out.println("[EmergencyVehicleAgent - " + getLocalName() + "] >>> Confirmação 3/3 (VERDE CONCEDIDO)! "
+                    + "Passagem segura garantida pelo semáforo " + senderName);
+            NetworkTopologyConfig topo = TrafficEnvironment.getInstance().getTopology();
+            if (currentTargetIntersection >= 0 && currentTargetIntersection < topo.getIntersectionCount()
+                    && senderName.endsWith(topo.getIntersectionName(currentTargetIntersection))) {
+                this.crossingState = VehicleCrossingState.PASSAGEM_SEGURA;
+            }
         }
     }
 

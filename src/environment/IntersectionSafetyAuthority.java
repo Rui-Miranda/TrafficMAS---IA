@@ -411,14 +411,16 @@ public class IntersectionSafetyAuthority {
         }
     }
 
-    // Instâncias únicas por cruzamento (0=NW, 1=NE, 2=SW, 3=SE)
-    private static final Map<Integer, IntersectionSafetyAuthority> AUTHORITIES = new HashMap<>();
+    // Instâncias únicas por cruzamento (0=NW, 1=NE, 2=SW, 3=SE ou 0..8 em 3x3)
+    private static final java.util.concurrent.ConcurrentHashMap<Integer, IntersectionSafetyAuthority> AUTHORITIES =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
-    public static synchronized IntersectionSafetyAuthority getAuthority(int intersectionIndex) {
-        if (!AUTHORITIES.containsKey(intersectionIndex)) {
-            AUTHORITIES.put(intersectionIndex, new IntersectionSafetyAuthority(intersectionIndex));
+    public static IntersectionSafetyAuthority getAuthority(int intersectionIndex) {
+        IntersectionSafetyAuthority existing = AUTHORITIES.get(intersectionIndex);
+        if (existing != null) {
+            return existing;
         }
-        return AUTHORITIES.get(intersectionIndex);
+        return AUTHORITIES.computeIfAbsent(intersectionIndex, IntersectionSafetyAuthority::new);
     }
 
     /** Reinicia todas as autoridades (útil para suites de testes) */

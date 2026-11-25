@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public class TrafficEnvironment {
 
-    private static TrafficEnvironment instance;
+    private static volatile TrafficEnvironment instance;
 
     /** Interface provedora de dados sensoriais (Fase 5 - Etapa 2) */
     public interface EnvironmentDataProvider {
@@ -62,11 +62,18 @@ public class TrafficEnvironment {
      *
      * @return Instância de {@link TrafficEnvironment}
      */
-    public static synchronized TrafficEnvironment getInstance() {
-        if (instance == null) {
-            instance = new TrafficEnvironment();
+    public static TrafficEnvironment getInstance() {
+        TrafficEnvironment local = instance;
+        if (local == null) {
+            synchronized (TrafficEnvironment.class) {
+                local = instance;
+                if (local == null) {
+                    local = new TrafficEnvironment();
+                    instance = local;
+                }
+            }
         }
-        return instance;
+        return local;
     }
 
     /* =========================================================================

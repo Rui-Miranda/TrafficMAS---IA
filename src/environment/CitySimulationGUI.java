@@ -47,6 +47,7 @@ public class CitySimulationGUI {
 
     public static class VisualVehicle {
         public String id;
+        public final String shortTag;
         public double x, y;
         public double currentSpeed = 0.0;
         public double maxSpeed = 2.4;
@@ -94,6 +95,8 @@ public class CitySimulationGUI {
         public VisualVehicle(String id, double x, double y, double maxSpeed, int direction,
                              Color color, ManeuverIntent intent, int laneIndex) {
             this.id = id;
+            String digits = (id != null) ? id.replaceAll("\\D+", "") : "";
+            this.shortTag = digits.isEmpty() ? (id != null ? id : "#") : ("#" + digits);
             this.x = x;
             this.y = y;
             this.maxSpeed = maxSpeed;
@@ -151,6 +154,13 @@ public class CitySimulationGUI {
     // Auditoria de segurança (zero atravessamentos no vermelho)
     private final AtomicInteger redLightViolationsCount = new AtomicInteger(0);
     private final AtomicInteger spawnSequence = new AtomicInteger(0);
+
+    // Prevenção geométrica rigorosa de colisões/sobreposições visuais (OBB / SAT)
+    private static final double VISUAL_HALF_LENGTH = (NetworkTopologyConfig.VEHICLE_LENGTH_PX / 2.0) + 0.5;   // 13.5 px (carroçaria + contorno)
+    private static final double VISUAL_HALF_WIDTH = (NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0) + 0.5;     // 7.5 px (carroçaria + contorno)
+    private static final double COLLISION_HALF_LENGTH = (NetworkTopologyConfig.VEHICLE_LENGTH_PX / 2.0) + 2.0; // 15.0 px
+    private static final double COLLISION_HALF_WIDTH = (NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0) + 1.5;   // 8.5 px
+    private static final double COLLISION_BROAD_RADIUS_SQ = 36.0 * 36.0;
 
     // Métricas de HUD em tempo real (volatile para visibilidade cross-thread entre EDT, Main e Agentes JADE)
     private volatile long simulationStartMillis;
@@ -289,6 +299,7 @@ public class CitySimulationGUI {
 
         // Inicializa os painéis e componentes Swing (mesmo em modo headless para testes e capturas PNG)
         cityPanel = new CityPanel();
+        cityPanel.setOpaque(true);
         cityPanel.setDoubleBuffered(true);
         cityPanel.setPreferredSize(new Dimension(topology.getWorldWidth(), topology.getWorldHeight()));
         installCanvasMouseInteraction();
@@ -331,21 +342,31 @@ public class CitySimulationGUI {
                 tickCounter++;
                 int interCount = topology.getIntersectionCount();
                 metrics.TrafficMetricsCollector.getInstance().advanceSimulatedTime(0.03333333333333333);
+
+                boolean needWaitingCounts = !SimulationClock.isSimulatedMode() || (tickCounter % 30 == 0);
+                int[] waitNS = null;
+                int[] waitEW = null;
+                if (needWaitingCounts) {
+                    waitNS = new int[interCount];
+                    waitEW = new int[interCount];
+                    computeAllWaitingCounts(waitNS, waitEW);
+                }
+
                 if (!SimulationClock.isSimulatedMode()) {
                     for (int i = 0; i < interCount; i++) {
                         IntersectionSafetyAuthority auth = IntersectionSafetyAuthority.getAuthority(i);
-                        auth.updateTick(getWaitingCount(i, 0), getWaitingCount(i, 1));
+                        auth.updateTick(waitNS[i], waitEW[i]);
                         lights[i][0] = auth.getLightState(0);
                         lights[i][1] = auth.getLightState(1);
                     }
                 }
                 if (tickCounter % 30 == 0) {
                     for (int i = 0; i < interCount; i++) {
-                        metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 0, getWaitingCount(i, 0));
-                        metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 1, getWaitingCount(i, 1));
+                        metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 0, waitNS[i]);
+                        metrics.TrafficMetricsCollector.getInstance().sampleQueue(i, 1, waitEW[i]);
                     }
                 }
-                if (tickCounter % 5 == 0) {
+                if (tickCounter % 10 == 0) {
                     refreshManualControlState();
                     refreshVehicleInspectionState();
                 }
@@ -1137,8 +1158,11 @@ public class CitySimulationGUI {
 
             for (int cOffset = 0; cOffset < numCorridors && !foundSafeSpot; cOffset++) {
                 int corridor = ((slotIndex / 2) + cOffset) % numCorridors;
-                for (int lOffset = 0; lOffset < 2 && !foundSafeSpot; lOffset++) {
-                    int lane = ((slotIndex + lOffset) % 2);
+                int maxLaneAttempts = isEmergency ? 1 : 2;
+                for (int lOffset = 0; lOffset < maxLaneAttempts && !foundSafeSpot; lOffset++) {
+                    // Prioritárias circulam exclusivamente na faixa interior/esquerda (1);
+                    // veículos normais preferem primeiro a faixa exterior/direita (0) mantendo a faixa 1 desimpedida
+                    int lane = isEmergency ? 1 : ((lOffset == 0) ? 0 : 1);
                     double laneCoord = top.getLaneCenterCoordinate(corridor, dir, lane);
 
                     double[] candidateLongitudinal = buildSafeLongitudinalCandidates(top, dir);
@@ -1167,7 +1191,7 @@ public class CitySimulationGUI {
             chosenDir = preferredDirection % 4;
             int numCorridors = (chosenDir == 0 || chosenDir == 1) ? cols : rows;
             int corridor = slotIndex % numCorridors;
-            chosenLane = (slotIndex / numCorridors) % 2;
+            chosenLane = isEmergency ? 1 : ((slotIndex / numCorridors) % 2);
             double laneCoord = top.getLaneCenterCoordinate(corridor, chosenDir, chosenLane);
             double offset = 35.0;
             while (true) {
@@ -1189,6 +1213,7 @@ public class CitySimulationGUI {
 
         double maxSpd = isEmergency ? 2.85 : 2.4;
         VisualVehicle v = new VisualVehicle(id, chosenX, chosenY, maxSpd, chosenDir, color, ManeuverIntent.GO_STRAIGHT, chosenLane);
+        v.laneIndex = chosenLane; // Garante correspondência exata entre laneIndex e a coordenada física escolhida
         v.isEmergency = isEmergency;
         if (category != null && !category.isEmpty()) {
             v.category = category;
@@ -1199,8 +1224,14 @@ public class CitySimulationGUI {
         int destIntersection = selectNextDestination(firstIntersection, v.direction, slotIndex);
         assignAStarRoute(v, firstIntersection, destIntersection);
 
-        // Ajusta a faixa inicial para coincidir com a primeira manobra planeada pelo A*, se estiver livre
-        int desiredLane = (v.intent == ManeuverIntent.TURN_RIGHT) ? 0 : 1;
+        if (isEmergency) {
+            // Viaturas de emergência mantêm corredor prioritário em frente na faixa da esquerda (1)
+            v.intent = ManeuverIntent.GO_STRAIGHT;
+        }
+
+        // Ajusta a faixa inicial: emergências sempre na faixa esquerda (1);
+        // veículos normais seguem a regra de trânsito (faixa 0 para em frente/direita, faixa 1 só para esquerda)
+        int desiredLane = isEmergency ? 1 : ((v.intent == ManeuverIntent.TURN_LEFT) ? 1 : 0);
         if (desiredLane != v.laneIndex) {
             int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
             double altCoord = top.getLaneCenterCoordinate(corridor, v.direction, desiredLane);
@@ -1501,16 +1532,28 @@ public class CitySimulationGUI {
 
         Runnable uiUpdater = () -> {
             if (lblSelectedCrossing != null) {
-                lblSelectedCrossing.setText("Cruzamento: " + label);
+                String txt = "Cruzamento: " + label;
+                if (!txt.equals(lblSelectedCrossing.getText())) {
+                    lblSelectedCrossing.setText(txt);
+                }
             }
             if (lblCrossingStates != null) {
-                lblCrossingStates.setText("| NS: " + nsReal + " | EW: " + ewReal + " | " + modeTag);
+                String txt = "| NS: " + nsReal + " | EW: " + ewReal + " | " + modeTag;
+                if (!txt.equals(lblCrossingStates.getText())) {
+                    lblCrossingStates.setText(txt);
+                }
             }
             if (btnManualAuto != null) {
-                btnManualAuto.setEnabled(manualActive || activeReq != null);
+                boolean enabled = (manualActive || activeReq != null);
+                if (btnManualAuto.isEnabled() != enabled) {
+                    btnManualAuto.setEnabled(enabled);
+                }
             }
             if (lblManualStatus != null) {
-                lblManualStatus.setText("Controlo Semafórico: " + statusDetail);
+                String txt = "Controlo Semafórico: " + statusDetail;
+                if (!txt.equals(lblManualStatus.getText())) {
+                    lblManualStatus.setText(txt);
+                }
             }
         };
 
@@ -1932,31 +1975,40 @@ public class CitySimulationGUI {
                 }
 
                 if (lblSelectedVehicleInfo != null) {
-                    lblSelectedVehicleInfo.setText("<html><b>Veículo:</b> <font color='#5fc3ff'>" + v.id + "</font> (" + cat + ") | <b>Velocidade:</b> " + speedStr + "<br>"
+                    String html = "<html><b>Veículo:</b> <font color='#5fc3ff'>" + v.id + "</font> (" + cat + ") | <b>Velocidade:</b> " + speedStr + "<br>"
                             + "<b>Faixa:</b> " + laneStr + " | <b>Estado:</b> " + status + "<br>"
                             + "<b>Origem:</b> " + origStr + " -> <b>Destino:</b> " + destStr + " | <b>Manobra:</b> " + intentStr + "<br>"
-                            + "<b>Rota A*:</b> <font color='#ffd746'>" + routeSb + "</font></html>");
+                            + "<b>Rota A*:</b> <font color='#ffd746'>" + routeSb + "</font></html>";
+                    if (!html.equals(lblSelectedVehicleInfo.getText())) {
+                        lblSelectedVehicleInfo.setText(html);
+                    }
                 }
-                if (btnApplyDestination != null) btnApplyDestination.setEnabled(true);
-                if (btnManeuverStraight != null) btnManeuverStraight.setEnabled(true);
-                if (btnManeuverLeft != null) btnManeuverLeft.setEnabled(true);
-                if (btnManeuverRight != null) btnManeuverRight.setEnabled(true);
+                if (btnApplyDestination != null && !btnApplyDestination.isEnabled()) btnApplyDestination.setEnabled(true);
+                if (btnManeuverStraight != null && !btnManeuverStraight.isEnabled()) btnManeuverStraight.setEnabled(true);
+                if (btnManeuverLeft != null && !btnManeuverLeft.isEnabled()) btnManeuverLeft.setEnabled(true);
+                if (btnManeuverRight != null && !btnManeuverRight.isEnabled()) btnManeuverRight.setEnabled(true);
                 if (comboDestination != null && v.destinationIntersectionId >= 0 && v.destinationIntersectionId < comboDestination.getItemCount()) {
-                    if (!comboDestination.hasFocus()) {
+                    if (!comboDestination.hasFocus() && comboDestination.getSelectedIndex() != v.destinationIntersectionId) {
                         comboDestination.setSelectedIndex(v.destinationIntersectionId);
                     }
                 }
             } else {
                 if (lblSelectedVehicleInfo != null) {
-                    lblSelectedVehicleInfo.setText("<html><i>Nenhum veículo selecionado.</i><br><font color='#a0b0c5'>Clique diretamente numa viatura no mapa para inspecionar e comandar o agente.</font></html>");
+                    String emptyHtml = "<html><i>Nenhum veículo selecionado.</i><br><font color='#a0b0c5'>Clique diretamente numa viatura no mapa para inspecionar e comandar o agente.</font></html>";
+                    if (!emptyHtml.equals(lblSelectedVehicleInfo.getText())) {
+                        lblSelectedVehicleInfo.setText(emptyHtml);
+                    }
                 }
-                if (btnApplyDestination != null) btnApplyDestination.setEnabled(false);
-                if (btnManeuverStraight != null) btnManeuverStraight.setEnabled(false);
-                if (btnManeuverLeft != null) btnManeuverLeft.setEnabled(false);
-                if (btnManeuverRight != null) btnManeuverRight.setEnabled(false);
+                if (btnApplyDestination != null && btnApplyDestination.isEnabled()) btnApplyDestination.setEnabled(false);
+                if (btnManeuverStraight != null && btnManeuverStraight.isEnabled()) btnManeuverStraight.setEnabled(false);
+                if (btnManeuverLeft != null && btnManeuverLeft.isEnabled()) btnManeuverLeft.setEnabled(false);
+                if (btnManeuverRight != null && btnManeuverRight.isEnabled()) btnManeuverRight.setEnabled(false);
             }
             if (lblVehicleActionFeedback != null) {
-                lblVehicleActionFeedback.setText("Ação: " + lastVehicleActionFeedback);
+                String fbTxt = "Ação: " + lastVehicleActionFeedback;
+                if (!fbTxt.equals(lblVehicleActionFeedback.getText())) {
+                    lblVehicleActionFeedback.setText(fbTxt);
+                }
             }
         };
 
@@ -2451,7 +2503,7 @@ public class CitySimulationGUI {
 
     public double getDistanceToTargetStopLine(VisualVehicle v) {
         if (v == null) return 9999.0;
-        return topology.getDistanceToTargetStopLine(v.x, v.y, v.direction);
+        return topology.getBumperDistanceToTargetStopLine(v.x, v.y, v.direction);
     }
 
     public int getApproachingCount(int interIdx, int axis) {
@@ -2471,24 +2523,39 @@ public class CitySimulationGUI {
     public int getWaitingCount(int interIdx, int axis) {
         int count = 0;
         for (VisualVehicle v : vehicles) {
-            if (v.inIntersection) continue;
+            if (v.inIntersection || v.currentSpeed >= 0.2) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
             double dist = getDistanceToTargetStopLine(v);
-            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 220.0 && v.currentSpeed < 0.2) {
+            if (dist >= 0 && dist <= 220.0 && getTargetIntersection(v) == interIdx) {
                 count++;
             }
         }
         return count;
     }
 
+    private void computeAllWaitingCounts(int[] waitNS, int[] waitEW) {
+        NetworkTopologyConfig top = this.topology;
+        int n = waitNS.length;
+        for (VisualVehicle v : vehicles) {
+            if (v.inIntersection || v.currentSpeed >= 0.2) continue;
+            double dist = top.getBumperDistanceToTargetStopLine(v.x, v.y, v.direction);
+            if (dist < 0.0 || dist > 220.0) continue;
+            int idx = top.getTargetIntersection(v.x, v.y, v.direction);
+            if (idx >= 0 && idx < n) {
+                if (v.direction == 0 || v.direction == 1) waitNS[idx]++;
+                else waitEW[idx]++;
+            }
+        }
+    }
+
     public boolean hasEmergencyApproaching(int interIdx, int axis) {
         for (VisualVehicle v : vehicles) {
-            if (!v.isEmergency || v.inIntersection) continue;
+            if (!v.isEmergency || !v.activeMission || v.inIntersection) continue;
             int targetAxis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
             if (targetAxis != axis) continue;
             double dist = getDistanceToTargetStopLine(v);
-            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 260.0) {
+            if (getTargetIntersection(v) == interIdx && dist >= 0 && dist <= 340.0) {
                 return true;
             }
         }
@@ -2664,16 +2731,46 @@ public class CitySimulationGUI {
                 continue;
             }
 
-            // 2. Se o veículo já iniciou a travessia retilínea em sinal VERDE, conclui a saída do cruzamento
+            // 2. Se o veículo já iniciou a travessia em sinal VERDE, conclui a entrada/saída do cruzamento
             if (v.crossingIntersection >= 0) {
-                double clearSpeed = Math.max(1.6, v.currentSpeed);
-                switch (v.direction) {
-                    case 0: v.y += clearSpeed; v.headingAngle = Math.PI / 2.0; break;
-                    case 1: v.y -= clearSpeed; v.headingAngle = -Math.PI / 2.0; break;
-                    case 2: v.x += clearSpeed; v.headingAngle = 0.0; break;
-                    case 3: v.x -= clearSpeed; v.headingAngle = Math.PI; break;
-                }
                 int ix = v.crossingIntersection;
+                double clearSpeed = (v.yieldState == VehicleYieldState.PULLING_OVER)
+                        ? Math.max(0.5, v.currentSpeed)
+                        : Math.max(1.6, v.currentSpeed);
+                v.currentSpeed = clearSpeed;
+                v.isBraking = false;
+                v.wasStopped = false;
+                v.startDelayTicks = 0;
+
+                if (v.intent == ManeuverIntent.TURN_RIGHT || v.intent == ManeuverIntent.TURN_LEFT) {
+                    double distToEntry = top.getDistanceToIntersectionStopLine(ix, v.x, v.y, v.direction);
+                    if (distToEntry <= 3.5) {
+                        v.crossingIntersection = -1;
+                        initiateIntersectionTurn(v, ix);
+                        continue;
+                    }
+                }
+
+                double candX = v.x;
+                double candY = v.y;
+                double candAngle;
+                switch (v.direction) {
+                    case 0: candY = v.y + clearSpeed; candAngle = Math.PI / 2.0; break;
+                    case 1: candY = v.y - clearSpeed; candAngle = -Math.PI / 2.0; break;
+                    case 2: candX = v.x + clearSpeed; candAngle = 0.0; break;
+                    default: candX = v.x - clearSpeed; candAngle = Math.PI; break;
+                }
+                if (!isMoveBlockedByCollision(v, candX, candY, candAngle)) {
+                    v.x = candX;
+                    v.y = candY;
+                    v.headingAngle = candAngle;
+                } else {
+                    v.currentSpeed = 0.0;
+                    v.isBraking = true;
+                }
+                if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
+                    performSmoothLateralShift(v, top, 0);
+                }
                 if (top.hasExitedIntersection(ix, v.x, v.y, v.direction)) {
                     recordIntersectionCrossing(v, ix);
                     v.crossingIntersection = -1;
@@ -2682,21 +2779,41 @@ public class CitySimulationGUI {
                 continue;
             }
 
-            // 3. Determinar o próximo cruzamento e a distância exata até à sua Stop Line
+            // 3. Determinar o próximo cruzamento e a distância exata (do para-choques dianteiro) até à sua Stop Line
             int nextIntersectionIdx = top.getTargetIntersection(v.x, v.y, v.direction);
-            double distToStopLine = top.getDistanceToTargetStopLine(v.x, v.y, v.direction);
+            double centerDistToStopLine = top.getDistanceToTargetStopLine(v.x, v.y, v.direction);
+            double distToStopLine = top.getBumperDistanceToTargetStopLine(v.x, v.y, v.direction);
             int axis = (v.direction == 0 || v.direction == 1) ? 0 : 1;
 
             LightState nextLight = LightState.GREEN;
-            if (nextIntersectionIdx >= 0 && nextIntersectionIdx < interCount && distToStopLine >= -4.0) {
+            if (nextIntersectionIdx >= 0 && nextIntersectionIdx < interCount && centerDistToStopLine >= -4.0) {
                 nextLight = lights[nextIntersectionIdx][axis];
                 IntersectionSafetyAuthority.assertSafetyInvariant(
                         lights[nextIntersectionIdx][0], lights[nextIntersectionIdx][1]);
             }
 
-            // 4. Publicação da Perceção Sensorial no Gateway para o VehicleAgent
-            VisualVehicle leaderObj = getLeadingVehicleObject(v);
-            double distToLeader = getDistanceToLeadingVehicle(v);
+            // 4. Publicação da Perceção Sensorial no Gateway para o VehicleAgent (busca de líder em passagem única)
+            VisualVehicle leaderObj = null;
+            double distToLeader = 9999.0;
+            for (VisualVehicle other : vehicles) {
+                if (other == v || other.direction != v.direction) continue;
+                if (v.direction == 0 || v.direction == 1) {
+                    if (Math.abs(other.x - v.x) > 17.5) continue;
+                } else {
+                    if (Math.abs(other.y - v.y) > 17.5) continue;
+                }
+                double d = 9999.0;
+                switch (v.direction) {
+                    case 0: if (other.y > v.y) d = other.y - v.y; break;
+                    case 1: if (other.y < v.y) d = v.y - other.y; break;
+                    case 2: if (other.x > v.x) d = other.x - v.x; break;
+                    case 3: if (other.x < v.x) d = v.x - other.x; break;
+                }
+                if (d < distToLeader) {
+                    distToLeader = d;
+                    leaderObj = other;
+                }
+            }
             double leaderSpeed = (leaderObj != null) ? leaderObj.currentSpeed : -1.0;
 
             EmergencyDetectionInfo emergInfo = detectRearEmergency(v, top);
@@ -2706,10 +2823,11 @@ public class CitySimulationGUI {
             double safeDist = 38.0 * roadCond.getSafeDistanceFactor();
             double stoppingDist = roadCond.calculateStoppingDistance(v.currentSpeed, 4.0);
             double maxDecel = roadCond.getServiceDeceleration();
+            double perceptionStopDist = (centerDistToStopLine >= 0.0 && distToStopLine < 0.0) ? 0.0 : distToStopLine;
 
             VehiclePerception perception = new VehiclePerception(
                     v.id, v.x, v.y, v.currentSpeed, v.maxSpeed, v.direction, v.laneIndex,
-                    v.inIntersection, nextIntersectionIdx, distToStopLine, nextLight,
+                    v.inIntersection, nextIntersectionIdx, perceptionStopDist, nextLight,
                     distToLeader, leaderSpeed, roadGraph.getGraphVersion(), globalSpeedMultiplier,
                     System.currentTimeMillis(), tickCounter,
                     emergInfo.detected, emergInfo.vehicleId, emergInfo.category, emergInfo.missionId,
@@ -2723,7 +2841,8 @@ public class CitySimulationGUI {
             // 5. Deliberação Autónoma do VehicleAgent vs. Paragem Controlada vs. Fallback Legacy
             boolean hasAgent = VehicleControlGateway.getInstance().isAgentRegistered(v.id);
             boolean blockedByLeader = (distToLeader < 38.0);
-            boolean approachingStopLine = (distToStopLine >= 0.0 && distToStopLine <= 65.0);
+            double effectiveStopThreshold = Math.max(65.0, 65.0 * roadCond.getSafeDistanceFactor());
+            boolean approachingStopLine = (centerDistToStopLine >= 0.0 && distToStopLine <= effectiveStopThreshold);
             boolean signalNotGreen = (nextLight != LightState.GREEN);
 
             if (hasAgent) {
@@ -2745,37 +2864,30 @@ public class CitySimulationGUI {
                     v.yieldState = decision.getYieldState();
                     v.yieldingToEmergencyId = decision.getYieldTargetVehicleId();
 
-                    // Gestão dos contadores de cedência física e mudança gradual de faixa (Fase 6.3)
-                    if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
-                        if (!v.yieldRecorded) {
-                            totalYieldsInitiated.incrementAndGet();
-                            v.yieldRecorded = true;
-                        }
-                        performSmoothLateralShift(v, top, decision.getDesiredLane());
-                    } else if (v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE || v.yieldState == VehicleYieldState.YIELDING_STOPPED) {
-                        if (v.yieldRecorded) {
-                            totalYieldsCompleted.incrementAndGet();
-                            v.yieldRecorded = false;
-                        }
-                    } else if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
-                        performSmoothLateralShift(v, top, decision.getDesiredLane());
-                    } else if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
-                        if (!v.yieldRecorded) {
-                            totalYieldsUnsafe.incrementAndGet();
-                            v.yieldRecorded = true;
-                        }
-                    } else {
-                        // Ajusta a faixa caso a decisão planeie uma viragem diferente
-                        if (distToStopLine > 68.0 && distToStopLine < 230.0 && decision.getDesiredLane() != v.laneIndex) {
-                            performSmoothLateralShift(v, top, decision.getDesiredLane());
-                        }
-                    }
+                    // Gestão da cedência física, mudança de faixa segura e centragem rigorosa na via
+                    int targetDesiredLane = v.isEmergency ? 1 : decision.getDesiredLane();
+                    manageVehicleLanePositioning(v, top, targetDesiredLane, distToStopLine);
 
-                    if (decision.getAction() == VehicleAction.BRAKE || decision.getAction() == VehicleAction.STOP) {
+                    if (decision.getAction() == VehicleAction.STOP) {
                         v.isBraking = true;
-                        double targetSpeed = decision.getTargetSpeed();
-                        v.currentSpeed = Math.max(0.0, Math.min(v.currentSpeed - 0.16, targetSpeed));
+                        v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.20);
                         if (v.currentSpeed == 0.0) {
+                            v.wasStopped = true;
+                            v.currentCrossingWaitSeconds += 0.03333333333333333;
+                            if (v.currentStopStartMillis == 0) {
+                                v.currentStopStartMillis = System.currentTimeMillis();
+                            }
+                        }
+                    } else if (decision.getAction() == VehicleAction.BRAKE) {
+                        v.isBraking = true;
+                        double targetSpeed = Math.max(0.0, Math.min(decision.getTargetSpeed(), v.maxSpeed * globalSpeedMultiplier));
+                        if (v.currentSpeed > targetSpeed) {
+                            v.currentSpeed = Math.max(targetSpeed, v.currentSpeed - 0.16);
+                        } else if (v.currentSpeed < targetSpeed) {
+                            v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.06);
+                        }
+                        if (v.currentSpeed < 0.05) {
+                            v.currentSpeed = 0.0;
                             v.wasStopped = true;
                             v.currentCrossingWaitSeconds += 0.03333333333333333;
                             if (v.currentStopStartMillis == 0) {
@@ -2789,7 +2901,7 @@ public class CitySimulationGUI {
                             v.currentStopStartMillis = 0;
                         }
                         double targetSpeed = Math.min(decision.getTargetSpeed(), v.maxSpeed * globalSpeedMultiplier);
-                        if (v.wasStopped) {
+                        if (v.wasStopped && !v.isEmergency) {
                             if (v.startDelayTicks < 10) {
                                 v.startDelayTicks++;
                                 v.currentSpeed = 0.0;
@@ -2801,7 +2913,10 @@ public class CitySimulationGUI {
                                 }
                             }
                         } else {
-                            v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.06);
+                            v.wasStopped = false;
+                            v.startDelayTicks = 0;
+                            double accel = v.isEmergency ? 0.14 : 0.06;
+                            v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + accel);
                         }
                     }
                 }
@@ -2817,17 +2932,17 @@ public class CitySimulationGUI {
                 if (distToStopLine > 0.0 && distToStopLine <= 240.0 && nextIntersectionIdx >= 0) {
                     ensureValidAStarIntentForApproach(v, nextIntersectionIdx);
                 }
-                if (distToStopLine > 68.0 && distToStopLine < 230.0) {
-                    alignVehicleLaneWithIntent(v, top);
-                }
+                int fallbackDesiredLane = v.isEmergency ? 1 : ((v.intent == ManeuverIntent.TURN_LEFT) ? 1 : 0);
+                manageVehicleLanePositioning(v, top, fallbackDesiredLane, distToStopLine);
                 boolean shouldBrakeForSignal = approachingStopLine && signalNotGreen;
                 boolean shouldBrake = blockedByLeader || shouldBrakeForSignal;
 
                 if (shouldBrake) {
                     v.isBraking = true;
+                    double safeStopDist = Math.max(0.0, distToStopLine);
                     double limitDist = blockedByLeader
-                            ? (shouldBrakeForSignal ? Math.min(distToLeader - 32.0, distToStopLine) : (distToLeader - 32.0))
-                            : distToStopLine;
+                            ? (shouldBrakeForSignal ? Math.min(distToLeader - 32.0, safeStopDist) : (distToLeader - 32.0))
+                            : safeStopDist;
 
                     if (limitDist <= 3.0) {
                         v.currentSpeed = 0.0;
@@ -2837,9 +2952,14 @@ public class CitySimulationGUI {
                             v.currentStopStartMillis = System.currentTimeMillis();
                         }
                     } else {
-                        double targetSpeed = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * globalSpeedMultiplier));
-                        v.currentSpeed = Math.max(0.0, v.currentSpeed - 0.16);
-                        if (v.currentSpeed > targetSpeed) v.currentSpeed = targetSpeed;
+                        double maxV = v.maxSpeed * globalSpeedMultiplier;
+                        double decel = 0.09 / roadCond.getSafeDistanceFactor();
+                        double targetSpeed = Math.max(0.30, Math.min(maxV, Math.sqrt(2.0 * decel * limitDist)));
+                        if (v.currentSpeed > targetSpeed) {
+                            v.currentSpeed = Math.max(targetSpeed, v.currentSpeed - 0.16);
+                        } else if (v.currentSpeed < targetSpeed) {
+                            v.currentSpeed = Math.min(targetSpeed, v.currentSpeed + 0.08);
+                        }
                     }
                 } else {
                     v.isBraking = false;
@@ -2848,7 +2968,7 @@ public class CitySimulationGUI {
                         v.currentStopStartMillis = 0;
                     }
                     double effectiveMaxSpeed = v.maxSpeed * globalSpeedMultiplier;
-                    if (v.wasStopped) {
+                    if (v.wasStopped && !v.isEmergency) {
                         if (v.startDelayTicks < 10) {
                             v.startDelayTicks++;
                             v.currentSpeed = 0.0;
@@ -2860,58 +2980,98 @@ public class CitySimulationGUI {
                             }
                         }
                     } else {
-                        v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + 0.06);
+                        v.wasStopped = false;
+                        v.startDelayTicks = 0;
+                        double accel = v.isEmergency ? 0.14 : 0.06;
+                        v.currentSpeed = Math.min(effectiveMaxSpeed, v.currentSpeed + accel);
                     }
                 }
             }
 
-            // 6. Invariante Físico de Segurança Absoluta (Anti-Colisão e Paragem no Vermelho)
+            // 6. Invariante Físico de Segurança Absoluta (Anti-Colisão e Paragem no Vermelho antes da Stop Line)
             if (blockedByLeader || (approachingStopLine && signalNotGreen)) {
+                double safeStopDist = Math.max(0.0, distToStopLine);
                 double limitDist = blockedByLeader
-                        ? ((approachingStopLine && signalNotGreen) ? Math.min(distToLeader - 32.0, distToStopLine) : (distToLeader - 32.0))
-                        : distToStopLine;
+                        ? ((approachingStopLine && signalNotGreen) ? Math.min(distToLeader - 32.0, safeStopDist) : (distToLeader - 32.0))
+                        : safeStopDist;
                 if (limitDist <= 3.0) {
                     v.currentSpeed = 0.0;
+                    v.isBraking = true;
                     v.wasStopped = true;
                 } else {
-                    double safeCap = Math.max(0.0, (limitDist / 50.0) * (v.maxSpeed * globalSpeedMultiplier));
+                    double maxV = v.maxSpeed * globalSpeedMultiplier;
+                    double decel = 0.09 / roadCond.getSafeDistanceFactor();
+                    double safeCap = Math.max(0.30, Math.min(maxV, Math.sqrt(2.0 * decel * limitDist)));
                     if (v.currentSpeed > safeCap) v.currentSpeed = safeCap;
                 }
             }
 
-            // 8. Início de Travessia ou Curva ao Atingir a Stop Line em Sinal VERDE
-            if (distToStopLine >= -1.0 && distToStopLine <= 3.5 && nextLight == LightState.GREEN && !blockedByLeader) {
-                if (!isIntersectionExitBlocked(v, nextIntersectionIdx, top)) {
-                    if (v.intent == ManeuverIntent.TURN_RIGHT || v.intent == ManeuverIntent.TURN_LEFT) {
+            // 8. Início de Travessia ou Curva ao Atingir a Stop Line (para-choques dianteiro) em Sinal VERDE
+            if (centerDistToStopLine >= -1.0 && distToStopLine <= 4.0 && nextLight == LightState.GREEN && !blockedByLeader) {
+                if (!isIntersectionExitBlocked(v, nextIntersectionIdx, top)
+                        && !hasConflictingVehicleInIntersection(v, nextIntersectionIdx)) {
+                    v.crossingIntersection = nextIntersectionIdx;
+                    if ((v.intent == ManeuverIntent.TURN_RIGHT || v.intent == ManeuverIntent.TURN_LEFT)
+                            && centerDistToStopLine <= 3.5) {
+                        v.crossingIntersection = -1;
                         initiateIntersectionTurn(v, nextIntersectionIdx);
                         continue;
-                    } else {
-                        v.crossingIntersection = nextIntersectionIdx;
                     }
                 } else {
                     v.currentSpeed = 0.0;
+                    v.isBraking = true;
                     v.wasStopped = true;
                     continue;
                 }
             }
 
-            // 9. Proteção física absoluta da Stop Line: nunca permite transpor a linha se o sinal não estiver VERDE
+            // 9. Proteção física absoluta da Stop Line: nunca permite que a frente do veículo transponha a linha se o sinal não estiver VERDE
             double stepDist = v.currentSpeed;
             if (approachingStopLine && signalNotGreen && (distToStopLine - stepDist) < 1.0) {
                 stepDist = Math.max(0.0, distToStopLine - 1.0);
                 v.currentSpeed = 0.0;
+                v.isBraking = true;
                 v.wasStopped = true;
+                if (v.currentStopStartMillis == 0) {
+                    v.currentStopStartMillis = System.currentTimeMillis();
+                }
             }
 
+            // 9.1 Proteção física absoluta anti-sobreposição visual (OBB / SAT) no avanço longitudinal
             double oldDist = distToStopLine;
+            double candAngle;
+            double dxUnit = 0.0, dyUnit = 0.0;
             switch (v.direction) {
-                case 0: v.y += stepDist; v.headingAngle = Math.PI / 2.0; break;
-                case 1: v.y -= stepDist; v.headingAngle = -Math.PI / 2.0; break;
-                case 2: v.x += stepDist; v.headingAngle = 0.0; break;
-                case 3: v.x -= stepDist; v.headingAngle = Math.PI; break;
+                case 0: dyUnit = 1.0; candAngle = Math.PI / 2.0; break;
+                case 1: dyUnit = -1.0; candAngle = -Math.PI / 2.0; break;
+                case 2: dxUnit = 1.0; candAngle = 0.0; break;
+                default: dxUnit = -1.0; candAngle = Math.PI; break;
             }
+            if (stepDist > 0.0) {
+                double candX = v.x + dxUnit * stepDist;
+                double candY = v.y + dyUnit * stepDist;
+                if (isMoveBlockedByCollision(v, candX, candY, candAngle)) {
+                    double lo = 0.0;
+                    double hi = stepDist;
+                    for (int iter = 0; iter < 5; iter++) {
+                        double mid = 0.5 * (lo + hi);
+                        if (isMoveBlockedByCollision(v, v.x + dxUnit * mid, v.y + dyUnit * mid, candAngle)) {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    stepDist = lo;
+                    v.currentSpeed = 0.0;
+                    v.isBraking = true;
+                    v.wasStopped = true;
+                }
+            }
+            v.x += dxUnit * stepDist;
+            v.y += dyUnit * stepDist;
+            v.headingAngle = candAngle;
 
-            double newDist = top.getDistanceToTargetStopLine(v.x, v.y, v.direction);
+            double newDist = top.getBumperDistanceToTargetStopLine(v.x, v.y, v.direction);
             if (oldDist > 0.5 && newDist < -0.5 && nextLight == LightState.RED && v.crossingIntersection < 0 && !v.inIntersection) {
                 redLightViolationsCount.incrementAndGet();
             }
@@ -2922,6 +3082,10 @@ public class CitySimulationGUI {
     }
 
     private void ensureValidAStarIntentForApproach(VisualVehicle v, int approachingIntersectionIdx) {
+        if (v.isEmergency && v.activeMission) {
+            v.intent = ManeuverIntent.GO_STRAIGHT;
+            return;
+        }
         long currentGraphVer = roadGraph.getGraphVersion();
         boolean needsRecalc = (v.activeRoute == null)
                 || !v.activeRoute.reachable
@@ -2948,6 +3112,10 @@ public class CitySimulationGUI {
     }
 
     private void onVehicleExitedIntersection(VisualVehicle v, int exitedIntersectionIdx) {
+        if (v.isEmergency && v.activeMission) {
+            v.intent = ManeuverIntent.GO_STRAIGHT;
+            return;
+        }
         int nextTarget = topology.getTargetIntersection(v.x, v.y, v.direction);
         if (exitedIntersectionIdx == v.destinationIntersectionId) {
             v.completedRoutesCount++;
@@ -3008,7 +3176,7 @@ public class CitySimulationGUI {
                     break;
             }
 
-            if (rearDist > 0.0 && rearDist <= 220.0) { // Alcance de perceção de aproximação
+            if (rearDist > 0.0 && rearDist <= 300.0) { // Alcance alargado para cedência antecipada do corredor esquerdo
                 if (rearDist < minRearDist) {
                     minRearDist = rearDist;
                     nearestEm = other;
@@ -3025,7 +3193,11 @@ public class CitySimulationGUI {
             info.category = (nearestEm.category != null ? nearestEm.category : "AMBULANCE");
             info.missionId = (nearestEm.mission != null ? nearestEm.mission.getMissionId() : ("MIS-" + nearestEm.id));
             info.emergencySpeed = nearestEm.currentSpeed;
-            info.emergencyLane = nearestEm.laneIndex;
+            // Calcula a faixa física real da viatura prioritária a partir da sua coordenada
+            double emCoord = (nearestEm.direction == 0 || nearestEm.direction == 1) ? nearestEm.x : nearestEm.y;
+            double emLane0 = top.getLaneCenterCoordinate(corridor, nearestEm.direction, 0);
+            double emLane1 = top.getLaneCenterCoordinate(corridor, nearestEm.direction, 1);
+            info.emergencyLane = (Math.abs(emCoord - emLane0) < Math.abs(emCoord - emLane1)) ? 0 : 1;
             info.relativeSpeed = Math.max(0.1, nearestEm.currentSpeed - v.currentSpeed);
             info.estimatedTimeToArrivalSeconds = (info.relativeSpeed > 0.05) ? (minRearDist / (info.relativeSpeed * 30.0)) : 9999.0;
 
@@ -3055,7 +3227,210 @@ public class CitySimulationGUI {
         return info;
     }
 
-    private void performSmoothLateralShift(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
+    private static boolean boxesOverlap(double ax, double ay, double aAngle,
+                                        double bx, double by, double bAngle,
+                                        double halfLen, double halfWid) {
+        double dx = bx - ax;
+        double dy = by - ay;
+        if (dx * dx + dy * dy > COLLISION_BROAD_RADIUS_SQ) {
+            return false;
+        }
+        double uAx = Math.cos(aAngle), uAy = Math.sin(aAngle);
+        double vAx = -uAy, vAy = uAx;
+        double uBx = Math.cos(bAngle), uBy = Math.sin(bAngle);
+        double vBx = -uBy, vBy = uBx;
+
+        // 4 eixos do Teorema dos Eixos Separadores (SAT) desenrolados sem alocações no heap
+        double c11 = Math.abs(uAx * uBx + uAy * uBy);
+        double c12 = Math.abs(uAx * vBx + uAy * vBy);
+        if (Math.abs(dx * uAx + dy * uAy) >= halfLen + halfLen * c11 + halfWid * c12) return false;
+
+        double c21 = Math.abs(vAx * uBx + vAy * uBy);
+        double c22 = Math.abs(vAx * vBx + vAy * vBy);
+        if (Math.abs(dx * vAx + dy * vAy) >= halfWid + halfLen * c21 + halfWid * c22) return false;
+
+        if (Math.abs(dx * uBx + dy * uBy) >= halfLen * c11 + halfWid * c21 + halfLen) return false;
+        if (Math.abs(dx * vBx + dy * vBy) >= halfLen * c12 + halfWid * c22 + halfWid) return false;
+
+        return true;
+    }
+
+    private boolean isMoveBlockedByCollision(VisualVehicle self, double candX, double candY, double candAngle) {
+        double moveDx = candX - self.x;
+        double moveDy = candY - self.y;
+        for (VisualVehicle other : vehicles) {
+            if (other == self) continue;
+            if (boxesOverlap(candX, candY, candAngle, other.x, other.y, other.headingAngle,
+                    COLLISION_HALF_LENGTH, COLLISION_HALF_WIDTH)) {
+                // Nunca permitir sobreposição real da carroçaria (26x14 + contorno)
+                boolean visualOverlap = boxesOverlap(candX, candY, candAngle, other.x, other.y, other.headingAngle,
+                        VISUAL_HALF_LENGTH, VISUAL_HALF_WIDTH);
+                double oldDistSq = (other.x - self.x) * (other.x - self.x) + (other.y - self.y) * (other.y - self.y);
+                double newDistSq = (other.x - candX) * (other.x - candX) + (other.y - candY) * (other.y - candY);
+
+                // Se estamos apenas na zona de folga (sem tocar visualmente) e a afastar-nos de um veículo que está atrás,
+                // permite avançar para libertar o cruzamento e impedir deadlocks mútuos em curva.
+                if (!visualOverlap && newDistSq > oldDistSq + 1e-6) {
+                    double relDotMove = (other.x - self.x) * moveDx + (other.y - self.y) * moveDy;
+                    if (relDotMove <= 0.0) {
+                        continue;
+                    }
+                }
+
+                boolean alreadyOverlapping = boxesOverlap(self.x, self.y, self.headingAngle,
+                        other.x, other.y, other.headingAngle,
+                        COLLISION_HALF_LENGTH, COLLISION_HALF_WIDTH);
+                if (!alreadyOverlapping) {
+                    return true;
+                }
+                if (newDistSq <= oldDistSq + 1e-6) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean isTargetLaneSpaceClear(VisualVehicle self, double targetX, double targetY,
+                                           double baseAngle, boolean isEmergencyYield) {
+        // Mudanças de faixa normais exigem uma janela longitudinal ampla (>= 44px centro-a-centro)
+        // para garantir que a manobra conclui sem ficar entalada sobre a linha tracejada;
+        // cedências de emergência mantêm folga responsiva (>= 34px) para libertar o corredor.
+        double laneHalfLen = isEmergencyYield ? (COLLISION_HALF_LENGTH + 2.0) : (COLLISION_HALF_LENGTH + 7.0);
+        double laneHalfWid = COLLISION_HALF_WIDTH + 0.5;  // 9.0 px
+        for (VisualVehicle other : vehicles) {
+            if (other == self) continue;
+            if (boxesOverlap(targetX, targetY, baseAngle, other.x, other.y, other.headingAngle,
+                    laneHalfLen, laneHalfWid)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasConflictingVehicleInIntersection(VisualVehicle self, int interIdx) {
+        int selfAxis = (self.direction == 0 || self.direction == 1) ? 0 : 1;
+        int ix = topology.getIntersectionX(interIdx);
+        int iy = topology.getIntersectionY(interIdx);
+        int rw = topology.getRoadWidth();
+
+        for (VisualVehicle other : vehicles) {
+            if (other == self) continue;
+            boolean otherCommittedToInter = (other.crossingIntersection == interIdx)
+                    || (other.inIntersection && other.activeIntersection == interIdx);
+            boolean otherInsideBox = (other.x > ix && other.x < ix + rw
+                    && other.y > iy && other.y < iy + rw);
+            if (!otherCommittedToInter && !otherInsideBox) {
+                continue;
+            }
+
+            // 1. Tráfego perpendicular ainda dentro da caixa do cruzamento
+            int otherAxis = (other.direction == 0 || other.direction == 1) ? 0 : 1;
+            if (otherAxis != selfAxis) {
+                return true;
+            }
+
+            // 2. Qualquer manobra de curva (TURN_LEFT ou TURN_RIGHT) já comprometida ou pretendida
+            //    no mesmo cruzamento: serializa entradas para impedir duas viaturas em curva lado-a-lado
+            //    a convergir para a mesma faixa de saída (evita deadlock mútuo em curva)
+            boolean selfTurning = (self.intent != ManeuverIntent.GO_STRAIGHT);
+            boolean otherTurning = (other.intent != ManeuverIntent.GO_STRAIGHT) || other.inIntersection;
+            if (otherCommittedToInter && (selfTurning || otherTurning)) {
+                // Se self segue em frente na faixa 1 (esquerda) e other vira à direita (mesmo sentido na faixa 0
+                // ou sentido oposto), as trajetórias não se cruzam — permite fluidez contínua na faixa prioritária
+                if (!selfTurning && self.laneIndex == 1 && other.intent == ManeuverIntent.TURN_RIGHT
+                        && (other.direction != self.direction || other.laneIndex == 0)) {
+                    continue;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void manageVehicleLanePositioning(VisualVehicle v, NetworkTopologyConfig top,
+                                              int desiredLane, double distToStopLine) {
+        if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
+            if (!v.yieldRecorded) {
+                totalYieldsInitiated.incrementAndGet();
+                v.yieldRecorded = true;
+            }
+            performSmoothLateralShift(v, top, desiredLane, true);
+            return;
+        }
+        if (v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE || v.yieldState == VehicleYieldState.YIELDING_STOPPED) {
+            if (v.yieldRecorded) {
+                totalYieldsCompleted.incrementAndGet();
+                v.yieldRecorded = false;
+            }
+            if (v.laneIndex == 0) {
+                performSmoothLateralShift(v, top, 0, true);
+            }
+            return;
+        }
+        if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
+            if (!performSmoothLateralShift(v, top, desiredLane, false)) {
+                recenterVehicleToCurrentLane(v, top);
+            }
+            return;
+        }
+        if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
+            if (!v.yieldRecorded) {
+                totalYieldsUnsafe.incrementAndGet();
+                v.yieldRecorded = true;
+            }
+            recenterVehicleToCurrentLane(v, top);
+            return;
+        }
+
+        int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
+        double currentCoord = (v.direction == 0 || v.direction == 1) ? v.x : v.y;
+        double ownLaneCenter = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
+        boolean alreadyOffCenter = Math.abs(currentCoord - ownLaneCenter) > 0.25;
+
+        if (desiredLane != v.laneIndex) {
+            // Viaturas de emergência em missão podem passar para a faixa 1 de ultrapassagem mesmo mais perto do cruzamento
+            if (v.isEmergency && v.activeMission && distToStopLine > 10.0) {
+                boolean shifted = performSmoothLateralShift(v, top, desiredLane, true);
+                if (!shifted && alreadyOffCenter) {
+                    recenterVehicleToCurrentLane(v, top);
+                }
+                return;
+            }
+            // Só inicia uma nova mudança de faixa com distância confortável antes da fila/stop line (> 85px);
+            // se já estava a meio de uma mudança iniciada (> 15px da stop line), tenta concluir ou recolhe à faixa atual.
+            boolean canStartShift = !alreadyOffCenter && distToStopLine > 85.0 && distToStopLine < 230.0;
+            boolean canFinishShift = alreadyOffCenter && distToStopLine > 15.0 && distToStopLine < 230.0;
+            if (canStartShift || canFinishShift) {
+                boolean shifted = performSmoothLateralShift(v, top, desiredLane, false);
+                if (!shifted && alreadyOffCenter) {
+                    recenterVehicleToCurrentLane(v, top);
+                }
+                return;
+            }
+        }
+
+        // Garante que nenhum veículo fica parado ou a circular desalinhado sobre a linha tracejada entre faixas
+        if (alreadyOffCenter) {
+            recenterVehicleToCurrentLane(v, top);
+        }
+    }
+
+    private void recenterVehicleToCurrentLane(VisualVehicle v, NetworkTopologyConfig top) {
+        int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
+        double currentCoord = (v.direction == 0 || v.direction == 1) ? v.x : v.y;
+        double ownLaneCenter = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
+        if (Math.abs(currentCoord - ownLaneCenter) > 0.05) {
+            performSmoothLateralShift(v, top, v.laneIndex, true);
+        }
+    }
+
+    private boolean performSmoothLateralShift(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
+        return performSmoothLateralShift(v, top, desiredLane, false);
+    }
+
+    private boolean performSmoothLateralShift(VisualVehicle v, NetworkTopologyConfig top,
+                                              int desiredLane, boolean isEmergencyYield) {
         int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
         double targetCoord = top.getLaneCenterCoordinate(corridor, v.direction, desiredLane);
 
@@ -3079,40 +3454,6 @@ public class CitySimulationGUI {
             }
         }
 
-        boolean isVertical = (v.direction == 0 || v.direction == 1);
-        double currentCoord = isVertical ? v.x : v.y;
-        double diff = targetCoord - currentCoord;
-
-        if (Math.abs(diff) < 0.6) {
-            if (isVertical) {
-                v.x = targetCoord;
-                v.headingAngle = (v.direction == 0) ? Math.PI / 2.0 : -Math.PI / 2.0;
-            } else {
-                v.y = targetCoord;
-                v.headingAngle = (v.direction == 2) ? 0.0 : Math.PI;
-            }
-            v.laneIndex = desiredLane;
-            return;
-        }
-
-        // Deslocamento lateral gradual adaptado à aderência do piso (Fase 6.4)
-        double maxShift = WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition().getMaxLateralShiftRate();
-        double step = Math.signum(diff) * Math.min(maxShift, Math.abs(diff));
-        double candX = isVertical ? (v.x + step) : v.x;
-        double candY = isVertical ? v.y : (v.y + step);
-
-        // Verificação contínua de colisão durante a transição lateral
-        for (VisualVehicle other : vehicles) {
-            if (other == v) continue;
-            if (Math.hypot(other.x - candX, other.y - candY) < 22.0) {
-                return; // Bloqueado por veículo na transição lateral; suspende avanço lateral
-            }
-        }
-
-        v.x = candX;
-        v.y = candY;
-
-        // Rotação suave do heading angle durante a manobra lateral (+/- 0.12 rad de inclinação)
         double baseAngle;
         switch (v.direction) {
             case 0: baseAngle = Math.PI / 2.0; break;
@@ -3120,8 +3461,58 @@ public class CitySimulationGUI {
             case 2: baseAngle = 0.0; break;
             default: baseAngle = Math.PI; break;
         }
+
+        boolean isVertical = (v.direction == 0 || v.direction == 1);
+        double currentCoord = isVertical ? v.x : v.y;
+        double diff = targetCoord - currentCoord;
+
+        // Antes de iniciar mudança de faixa a partir do centro da faixa atual, verificar se existe espaço livre na faixa destino
+        if (desiredLane != v.laneIndex) {
+            double ownLaneCenter = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
+            if (Math.abs(currentCoord - ownLaneCenter) < 1.5) {
+                double destX = isVertical ? targetCoord : v.x;
+                double destY = isVertical ? v.y : targetCoord;
+                if (!isTargetLaneSpaceClear(v, destX, destY, baseAngle, isEmergencyYield)) {
+                    v.headingAngle = baseAngle;
+                    return false; // Faixa destino ocupada: mantém-se alinhado na faixa atual sem invadir a linha tracejada
+                }
+            }
+        }
+
+        if (Math.abs(diff) < 0.6) {
+            double snapX = isVertical ? targetCoord : v.x;
+            double snapY = isVertical ? v.y : targetCoord;
+            if (isMoveBlockedByCollision(v, snapX, snapY, baseAngle)) {
+                v.headingAngle = baseAngle;
+                return false;
+            }
+            v.x = snapX;
+            v.y = snapY;
+            v.headingAngle = baseAngle;
+            v.laneIndex = desiredLane;
+            return true;
+        }
+
+        // Deslocamento lateral gradual adaptado à aderência do piso (Fase 6.4)
+        double maxShift = WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition().getMaxLateralShiftRate();
+        double step = Math.signum(diff) * Math.min(maxShift, Math.abs(diff));
+        double candX = isVertical ? (v.x + step) : v.x;
+        double candY = isVertical ? v.y : (v.y + step);
         double tilt = Math.signum(step) * 0.12;
-        v.headingAngle = baseAngle + tilt;
+        double candAngle = baseAngle + tilt;
+
+        // Verificação geométrica rigorosa (OBB / SAT) durante toda a transição lateral
+        boolean blockedStraight = isMoveBlockedByCollision(v, candX, candY, baseAngle);
+        if (blockedStraight) {
+            v.headingAngle = baseAngle;
+            return false; // Bloqueado por veículo na transição lateral; suspende avanço lateral sem sobrepor
+        }
+        boolean blockedTilted = isMoveBlockedByCollision(v, candX, candY, candAngle);
+
+        v.x = candX;
+        v.y = candY;
+        v.headingAngle = blockedTilted ? baseAngle : candAngle;
+        return true;
     }
 
     private void alignVehicleLaneWithDesired(VisualVehicle v, NetworkTopologyConfig top, int desiredLane) {
@@ -3129,7 +3520,7 @@ public class CitySimulationGUI {
     }
 
     private void alignVehicleLaneWithIntent(VisualVehicle v, NetworkTopologyConfig top) {
-        int desiredLane = (v.intent == ManeuverIntent.TURN_RIGHT) ? 0 : 1;
+        int desiredLane = v.isEmergency ? 1 : ((v.intent == ManeuverIntent.TURN_LEFT) ? 1 : 0);
         alignVehicleLaneWithDesired(v, top, desiredLane);
     }
 
@@ -3177,9 +3568,19 @@ public class CitySimulationGUI {
                 break;
         }
 
+        boolean outVertical = (outDir == 0 || outDir == 1);
         for (VisualVehicle other : vehicles) {
             if (other == v || other.inIntersection) continue;
-            if (other.direction == outDir && other.currentSpeed < 0.2 && Math.hypot(other.x - checkX, other.y - checkY) < 28.0) {
+            if (other.direction != outDir) continue;
+            // Verificação separada por eixo: faixa lateral (< 16px, pois as faixas distam 24px)
+            // e distância longitudinal (< 34px), evitando que carros na faixa 0 bloqueiem a faixa 1!
+            double lateralDist = outVertical ? Math.abs(other.x - checkX) : Math.abs(other.y - checkY);
+            double longDist = outVertical ? Math.abs(other.y - checkY) : Math.abs(other.x - checkX);
+            if (lateralDist < 16.0 && longDist < 34.0) {
+                // Para emergências em missão, só considera saída bloqueada se a viatura à frente estiver quase parada
+                if (v.isEmergency && v.activeMission && other.currentSpeed >= 0.45) {
+                    continue;
+                }
                 return true;
             }
         }
@@ -3206,19 +3607,32 @@ public class CitySimulationGUI {
         }
 
         if (wrapped) {
+            if (v.isEmergency) {
+                v.laneIndex = 1;
+            }
+            int corridor = (v.direction == 0 || v.direction == 1) ? top.getClosestCol(v.x) : top.getClosestRow(v.y);
+            double exactLaneCoord = top.getLaneCenterCoordinate(corridor, v.direction, v.laneIndex);
+            if (v.direction == 0 || v.direction == 1) {
+                v.x = exactLaneCoord;
+            } else {
+                v.y = exactLaneCoord;
+            }
             v.wasStopped = false;
             v.crossingIntersection = -1;
             v.inIntersection = false;
             int firstNode = top.getTargetIntersection(v.x, v.y, v.direction);
             int nextDest = selectNextDestination(firstNode, v.direction, v.completedRoutesCount + 1);
             assignAStarRoute(v, firstNode, nextDest);
+            if (v.isEmergency) {
+                v.intent = ManeuverIntent.GO_STRAIGHT;
+            }
         }
     }
 
     private double findSafeWrapCoordinate(VisualVehicle self, double baseX, double baseY, int dir, double stepOffset) {
         double candX = baseX;
         double candY = baseY;
-        for (int attempt = 0; attempt < 15; attempt++) {
+        for (int attempt = 0; attempt < 60; attempt++) {
             boolean clash = false;
             for (VisualVehicle other : vehicles) {
                 if (other == self) continue;
@@ -3241,11 +3655,11 @@ public class CitySimulationGUI {
         for (VisualVehicle other : vehicles) {
             if (other == v || other.direction != v.direction) continue;
 
-            // Verificar se estão na mesma faixa física (tolerância lateral de 14px)
+            // Verificar se estão na mesma faixa física ou a invadir lateralmente (largura 14px + folga; faixa = 24px)
             if (v.direction == 0 || v.direction == 1) {
-                if (Math.abs(other.x - v.x) > 14.0) continue;
+                if (Math.abs(other.x - v.x) > 17.5) continue;
             } else {
-                if (Math.abs(other.y - v.y) > 14.0) continue;
+                if (Math.abs(other.y - v.y) > 17.5) continue;
             }
 
             double d = 9999.0;
@@ -3275,9 +3689,9 @@ public class CitySimulationGUI {
             if (other == v || other.direction != v.direction) continue;
 
             if (v.direction == 0 || v.direction == 1) {
-                if (Math.abs(other.x - v.x) > 14.0) continue;
+                if (Math.abs(other.x - v.x) > 17.5) continue;
             } else {
-                if (Math.abs(other.y - v.y) > 14.0) continue;
+                if (Math.abs(other.y - v.y) > 17.5) continue;
             }
 
             double d = 9999.0;
@@ -3373,11 +3787,18 @@ public class CitySimulationGUI {
     private void updateIntersectionManeuver(VisualVehicle v) {
         NetworkTopologyConfig top = this.topology;
         double curveSpeed = Math.max(1.4, v.currentSpeed * 0.85);
-        v.turnProgress += (curveSpeed / 45.0);
+        double nextProgress = v.turnProgress + (curveSpeed / 45.0);
 
-        if (v.turnProgress >= 1.0) {
+        if (nextProgress >= 1.0) {
+            if (isMoveBlockedByCollision(v, v.turnEndX, v.turnEndY, v.turnTargetAngle)) {
+                v.currentSpeed = 0.0;
+                v.isBraking = true;
+                return;
+            }
             int completedInter = v.activeIntersection;
+            v.turnProgress = 1.0;
             v.inIntersection = false;
+            v.isBraking = false;
             recordIntersectionCrossing(v, completedInter);
             v.activeIntersection = -1;
             v.x = v.turnEndX;
@@ -3393,7 +3814,7 @@ public class CitySimulationGUI {
             return;
         }
 
-        double t = v.turnProgress;
+        double t = nextProgress;
         int ix = top.getIntersectionX(v.activeIntersection);
         int iy = top.getIntersectionY(v.activeIntersection);
         int rw = top.getRoadWidth();
@@ -3417,10 +3838,17 @@ public class CitySimulationGUI {
 
         double dx = nextX - v.x;
         double dy = nextY - v.y;
-        if (Math.hypot(dx, dy) > 0.01) {
-            v.headingAngle = Math.atan2(dy, dx);
+        double nextAngle = (Math.hypot(dx, dy) > 0.01) ? Math.atan2(dy, dx) : v.headingAngle;
+
+        if (isMoveBlockedByCollision(v, nextX, nextY, nextAngle)) {
+            v.currentSpeed = 0.0;
+            v.isBraking = true;
+            return;
         }
 
+        v.turnProgress = nextProgress;
+        v.isBraking = false;
+        v.headingAngle = nextAngle;
         v.x = nextX;
         v.y = nextY;
     }
@@ -3430,32 +3858,153 @@ public class CitySimulationGUI {
      * ========================================================================= */
 
     private class CityPanel extends JPanel {
+        // Cache offscreen do fundo estático urbano já escalado ao zoom atual (blit 1:1 sem reamostragem por frame)
+        private BufferedImage staticBackdropCache = null;
+        private NetworkTopologyConfig cachedBackdropTopology = null;
+        private RoadCondition cachedBackdropRoadCondition = null;
+        private double cachedBackdropZoom = -1.0;
+
+        // Recursos Java2D pré-alocados para evitar centenas de alocações por frame
+        private final Font fontBold8 = new Font("Segoe UI", Font.BOLD, 8);
+        private final Font fontBold9 = new Font("Segoe UI", Font.BOLD, 9);
+        private final Font fontBold10 = new Font("Segoe UI", Font.BOLD, 10);
+        private final Font fontBold11 = new Font("Segoe UI", Font.BOLD, 11);
+        private final Font fontBold13 = new Font("Segoe UI", Font.BOLD, 13);
+        private final Font fontPlain10 = new Font("Segoe UI", Font.PLAIN, 10);
+
+        private final BasicStroke stroke10 = new BasicStroke(1.0f);
+        private final BasicStroke stroke12 = new BasicStroke(1.2f);
+        private final BasicStroke stroke15 = new BasicStroke(1.5f);
+        private final BasicStroke stroke22Cap = new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
+        private final BasicStroke stroke25 = new BasicStroke(2.5f);
+        private final BasicStroke stroke45 = new BasicStroke(4.5f);
+        private final BasicStroke strokeSelDash = new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
+                0, new float[] { 6, 4 }, 0);
+
+        private final Color colSelHalo = new Color(0, 215, 255, 70);
+        private final Color colSelDash = new Color(255, 215, 40, 230);
+        private final Color colInterName = new Color(255, 255, 255, 215);
+        private final Color colInterBadgeBg = new Color(20, 24, 30, 190);
+        private final Color colModeEmerg = new Color(235, 45, 55);
+        private final Color colModeTrans = new Color(245, 175, 25);
+        private final Color colModeManual = new Color(0, 195, 245);
+        private final Color colModeAuto = new Color(150, 175, 195);
+
+        private final Color colBulbRedHalo1 = new Color(255, 0, 0, 60);
+        private final Color colBulbRedHalo2 = new Color(255, 0, 0, 130);
+        private final Color colBulbRedOff = new Color(63, 0, 0, 210);
+        private final Color colBulbYelHalo1 = new Color(255, 255, 0, 60);
+        private final Color colBulbYelHalo2 = new Color(255, 255, 0, 130);
+        private final Color colBulbYelOff = new Color(63, 63, 0, 210);
+        private final Color colBulbGrnHalo1 = new Color(40, 225, 100, 60);
+        private final Color colBulbGrnHalo2 = new Color(40, 225, 100, 130);
+        private final Color colBulbGrnOff = new Color(10, 56, 25, 210);
+
+        private final Color colShadow = new Color(0, 0, 0, 90);
+        private final Color colCarBorder = new Color(255, 255, 255, 110);
+        private final Color colWindow = new Color(25, 30, 40);
+        private final Color colHeadlight = new Color(245, 245, 230);
+        private final Color colBrakeOn = new Color(235, 40, 40);
+        private final Color colBrakeOff = new Color(130, 40, 40);
+        private final Color colSirenBlue = new Color(0, 140, 255);
+        private final Color colSirenRed = new Color(255, 30, 30);
+        private final Color colTagBg = new Color(20, 26, 38, 225);
+        private final Color colTagGold = new Color(255, 215, 70);
+        private final Color colEmergText = new Color(210, 30, 50);
+        private final Color colMicroTag = new Color(50, 60, 75, 200);
+        private final Color colYieldOrange = new Color(255, 140, 0, 220);
+        private final Color colYieldGreen = new Color(34, 139, 34, 220);
+        private final Color colYieldRed = new Color(220, 20, 60, 220);
+        private final Color colYieldBlue = new Color(70, 130, 180, 220);
+        private final Color colYieldGray = new Color(100, 110, 125, 220);
+        private final Color colPost = new Color(110, 115, 125);
+        private final Color colPostBase = new Color(60, 65, 75);
+        private final Color colLightBox = new Color(24, 27, 33);
+        private final Color colLightBorder = new Color(85, 92, 105);
+        private final Color colLightGreen = new Color(40, 225, 100);
+        private final Color colHudBg = new Color(250, 252, 255, 245);
+        private final Color colHudBorder = new Color(190, 200, 215);
+        private final Color colHudTitle = new Color(30, 40, 55);
+        private final Color colHudSub = new Color(100, 115, 135);
+        private final Color colHudOk = new Color(30, 140, 60);
+        private final Color colHudAlert = new Color(220, 50, 50);
+        private final Color colHudBadgeTitle = new Color(110, 125, 145);
+        private final Color colHudCrossLbl = new Color(80, 95, 115);
+        private final Color colHudGreen = new Color(40, 200, 90);
+        private final Color colHudYellow = new Color(240, 190, 30);
+        private final Color colHudRed = new Color(230, 60, 60);
+        private final Color colBadgeNorm = new Color(20, 130, 210);
+        private final Color colBadgePrio = new Color(200, 35, 65);
+        private final Color colBadgeJade = new Color(60, 95, 180);
+        private final Color colBadgeStop = new Color(220, 60, 60);
+        private final Color colBadgeGo = new Color(40, 170, 90);
+        private final Color colBadgeWait = new Color(220, 120, 20);
+        private final Color colBadgeFlow = new Color(30, 160, 110);
+        private final Color colBadgeFps = new Color(95, 95, 145);
+
+        private final RoundRectangle2D.Double carShadowShape = new RoundRectangle2D.Double(
+                -NetworkTopologyConfig.VEHICLE_LENGTH_PX / 2.0 + 2, -NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0 + 3,
+                NetworkTopologyConfig.VEHICLE_LENGTH_PX, NetworkTopologyConfig.VEHICLE_WIDTH_PX, 6, 6);
+        private final RoundRectangle2D.Double carBodyShape = new RoundRectangle2D.Double(
+                -NetworkTopologyConfig.VEHICLE_LENGTH_PX / 2.0, -NetworkTopologyConfig.VEHICLE_WIDTH_PX / 2.0,
+                NetworkTopologyConfig.VEHICLE_LENGTH_PX, NetworkTopologyConfig.VEHICLE_WIDTH_PX, 6, 6);
+        private final RoundRectangle2D.Double lightHousingShape = new RoundRectangle2D.Double(-6.5, -16.5, 13, 33, 6, 6);
+
+        private BufferedImage getOrBuildStaticBackdrop(int worldW, int worldH, RoadCondition rc, double scale) {
+            int scaledW = Math.max(1, (int) Math.round(worldW * scale));
+            int scaledH = Math.max(1, (int) Math.round(worldH * scale));
+            if (staticBackdropCache != null
+                    && cachedBackdropTopology == topology
+                    && cachedBackdropRoadCondition == rc
+                    && Math.abs(cachedBackdropZoom - scale) < 1e-4
+                    && staticBackdropCache.getWidth() == scaledW
+                    && staticBackdropCache.getHeight() == scaledH) {
+                return staticBackdropCache;
+            }
+            BufferedImage img = new BufferedImage(scaledW, scaledH, BufferedImage.TYPE_INT_RGB);
+            Graphics2D bg = img.createGraphics();
+            try {
+                bg.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                bg.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+                bg.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+                if (scale != 1.0) {
+                    bg.scale(scale, scale);
+                }
+
+                bg.setColor(new Color(230, 234, 240));
+                bg.fillRect(0, 0, worldW, worldH);
+                drawUrbanBlocks(bg, worldW, worldH);
+                drawRoadsAndMarkings(bg, worldW, worldH);
+            } finally {
+                bg.dispose();
+            }
+            staticBackdropCache = img;
+            cachedBackdropTopology = topology;
+            cachedBackdropRoadCondition = rc;
+            cachedBackdropZoom = scale;
+            return img;
+        }
+
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g.create();
             try {
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-                g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-                g2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
-
-                if (zoomScale != 1.0) {
-                    g2.scale(zoomScale, zoomScale);
-                }
-
                 int worldW = topology.getWorldWidth();
                 int worldH = topology.getWorldHeight();
+                double scale = zoomScale;
+                RoadCondition rc = WeatherEnvironmentManager.getInstance().getSnapshot().getRoadCondition();
 
-                // 1. Terreno Urbano Claro Diurno
-                g2.setColor(new Color(230, 234, 240));
-                g2.fillRect(0, 0, worldW, worldH);
+                // 1–3. Blit 1:1 da cache estática pré-escalada (< 0.5 ms, sem reamostragem por frame)
+                g2.drawImage(getOrBuildStaticBackdrop(worldW, worldH, rc, scale), 0, 0, null);
 
-                // 2. Quarteirões Urbanos com Zonas Verdes e Edifícios (parametrizado para 2×2 ou 3×3)
-                drawUrbanBlocks(g2, worldW, worldH);
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_SPEED);
+                g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-                // 3. Avenidas de 4 Faixas com Asfalto Limpo no Centro das Interseções
-                drawRoadsAndMarkings(g2, worldW, worldH);
+                if (scale != 1.0) {
+                    g2.scale(scale, scale);
+                }
 
                 // 4. Semáforos montados no bordo direito de cada fluxo com postes e luzes
                 drawIntersectionsAndLights(g2);
@@ -3717,13 +4266,12 @@ public class CitySimulationGUI {
                 // Destaque visual do cruzamento selecionado por clique (Fase 6.2)
                 if (idx == selectedIntersectionIndex) {
                     Stroke prevStroke = g2.getStroke();
-                    g2.setColor(new Color(0, 215, 255, 70));
-                    g2.setStroke(new BasicStroke(4.5f));
-                    g2.draw(new RoundRectangle2D.Double(ix - 8, iy - 8, rw + 16, rw + 16, 12, 12));
-                    g2.setColor(new Color(255, 215, 40, 230));
-                    g2.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
-                            0, new float[] { 6, 4 }, 0));
-                    g2.draw(new RoundRectangle2D.Double(ix - 5, iy - 5, rw + 10, rw + 10, 10, 10));
+                    g2.setColor(colSelHalo);
+                    g2.setStroke(stroke45);
+                    g2.drawRoundRect(ix - 8, iy - 8, rw + 16, rw + 16, 12, 12);
+                    g2.setColor(colSelDash);
+                    g2.setStroke(strokeSelDash);
+                    g2.drawRoundRect(ix - 5, iy - 5, rw + 10, rw + 10, 10, 10);
                     g2.setStroke(prevStroke);
                 }
 
@@ -3733,8 +4281,8 @@ public class CitySimulationGUI {
                 drawTrafficLight(g2, ix - 22, iy + rw + 13, 2, ewState);
                 drawTrafficLight(g2, ix + rw + 22, iy - 13, 3, ewState);
 
-                g2.setColor(new Color(255, 255, 255, 215));
-                g2.setFont(new Font("Segoe UI", Font.BOLD, 11));
+                g2.setColor(colInterName);
+                g2.setFont(fontBold11);
                 g2.drawString(name, ix + rw / 2 - 20, iy + rw / 2 - 2);
 
                 // Etiqueta de Modo de Controlo do Cruzamento (AUTO / MANUAL / TRANS. / EMERG!)
@@ -3744,21 +4292,21 @@ public class CitySimulationGUI {
                 Color badgeColor;
                 if (auth.isEmergencyActive()) {
                     modeBadge = "EMERG!";
-                    badgeColor = new Color(235, 45, 55);
+                    badgeColor = colModeEmerg;
                 } else if (mReq != null && mReq.getState() == IntersectionSafetyAuthority.ManualRequestState.ACCEPTED) {
                     modeBadge = "TRANS.";
-                    badgeColor = new Color(245, 175, 25);
+                    badgeColor = colModeTrans;
                 } else if (auth.isManualModeActive()) {
                     modeBadge = "MANUAL";
-                    badgeColor = new Color(0, 195, 245);
+                    badgeColor = colModeManual;
                 } else {
                     modeBadge = "AUTO";
-                    badgeColor = new Color(150, 175, 195);
+                    badgeColor = colModeAuto;
                 }
-                g2.setColor(new Color(20, 24, 30, 190));
+                g2.setColor(colInterBadgeBg);
                 g2.fillRoundRect(ix + rw / 2 - 22, iy + rw / 2 + 4, 44, 13, 5, 5);
                 g2.setColor(badgeColor);
-                g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+                g2.setFont(fontBold9);
                 g2.drawString(modeBadge, ix + rw / 2 - 18, iy + rw / 2 + 14);
             }
         }
@@ -3777,165 +4325,161 @@ public class CitySimulationGUI {
             g2.translate(x, y);
             g2.rotate(rotAngle);
 
-            g2.setColor(new Color(110, 115, 125));
-            g2.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            g2.setColor(colPost);
+            g2.setStroke(stroke22Cap);
             g2.drawLine(0, 18, 0, 26);
-            g2.setColor(new Color(60, 65, 75));
+            g2.setColor(colPostBase);
             g2.fillOval(-3, 24, 6, 6);
 
-            int bw = 13;
-            int bh = 33;
-            int bx = -bw / 2;
-            int by = -bh / 2;
+            int bx = -6;
+            int by = -16;
 
-            g2.setColor(new Color(24, 27, 33));
-            g2.fill(new RoundRectangle2D.Double(bx, by, bw, bh, 6, 6));
-            g2.setColor(new Color(85, 92, 105));
-            g2.setStroke(new BasicStroke(1.0f));
-            g2.draw(new RoundRectangle2D.Double(bx, by, bw, bh, 6, 6));
+            g2.setColor(colLightBox);
+            g2.fill(lightHousingShape);
+            g2.setColor(colLightBorder);
+            g2.setStroke(stroke10);
+            g2.draw(lightHousingShape);
 
-            drawBulb(g2, bx + 2, by + 3, state == LightState.RED, Color.RED);
-            drawBulb(g2, bx + 2, by + 12, state == LightState.YELLOW, Color.YELLOW);
-            drawBulb(g2, bx + 2, by + 21, state == LightState.GREEN, new Color(40, 225, 100));
+            drawBulb(g2, bx + 2, by + 3, state == LightState.RED, Color.RED, colBulbRedHalo1, colBulbRedHalo2, colBulbRedOff);
+            drawBulb(g2, bx + 2, by + 12, state == LightState.YELLOW, Color.YELLOW, colBulbYelHalo1, colBulbYelHalo2, colBulbYelOff);
+            drawBulb(g2, bx + 2, by + 21, state == LightState.GREEN, colLightGreen, colBulbGrnHalo1, colBulbGrnHalo2, colBulbGrnOff);
 
             g2.setTransform(oldTransform);
         }
 
-        private void drawBulb(Graphics2D g2, int bx, int by, boolean active, Color c) {
+        private void drawBulb(Graphics2D g2, int bx, int by, boolean active,
+                              Color c, Color halo1, Color halo2, Color offColor) {
             int size = 8;
             if (active) {
-                g2.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 60));
+                g2.setColor(halo1);
                 g2.fillOval(bx - 3, by - 3, size + 6, size + 6);
-                g2.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 130));
+                g2.setColor(halo2);
                 g2.fillOval(bx - 1, by - 1, size + 2, size + 2);
                 g2.setColor(c);
                 g2.fillOval(bx, by, size, size);
             } else {
-                g2.setColor(new Color(c.getRed() / 4, c.getGreen() / 4, c.getBlue() / 4, 210));
+                g2.setColor(offColor);
                 g2.fillOval(bx, by, size, size);
             }
         }
 
         private void drawVehicles(Graphics2D g2) {
+            int vLength = (int) NetworkTopologyConfig.VEHICLE_LENGTH_PX;
+            int vWidth = (int) NetworkTopologyConfig.VEHICLE_WIDTH_PX;
+            boolean strobe = (tickCounter / 6) % 2 == 0;
+            String selId = selectedVehicleId;
+
             for (VisualVehicle v : vehicles) {
                 AffineTransform old = g2.getTransform();
-
-                int vLength = 26;
-                int vWidth = 14;
 
                 g2.translate(v.x, v.y);
                 g2.rotate(v.headingAngle);
 
                 // Sombra suave
-                g2.setColor(new Color(0, 0, 0, 90));
-                g2.fill(new RoundRectangle2D.Double(-vLength / 2.0 + 2, -vWidth / 2.0 + 3, vLength, vWidth, 6, 6));
+                g2.setColor(colShadow);
+                g2.fill(carShadowShape);
 
                 // Halo e anel dourado de seleção de viatura
-                if (v.id.equals(selectedVehicleId)) {
+                boolean isSelected = v.id.equals(selId);
+                if (isSelected) {
                     g2.setColor(new Color(255, 215, 0, 80));
                     g2.fillOval(-vLength / 2 - 8, -vWidth / 2 - 8, vLength + 16, vWidth + 16);
                     g2.setColor(new Color(255, 215, 0, 240));
-                    g2.setStroke(new BasicStroke(2.5f));
+                    g2.setStroke(stroke25);
                     g2.drawOval(-vLength / 2 - 5, -vWidth / 2 - 5, vLength + 10, vWidth + 10);
                 }
 
                 // Carroçaria
                 g2.setColor(v.color);
-                g2.fill(new RoundRectangle2D.Double(-vLength / 2.0, -vWidth / 2.0, vLength, vWidth, 6, 6));
+                g2.fill(carBodyShape);
 
-                g2.setColor(new Color(255, 255, 255, 110));
-                g2.setStroke(new BasicStroke(1.0f));
-                g2.draw(new RoundRectangle2D.Double(-vLength / 2.0, -vWidth / 2.0, vLength, vWidth, 6, 6));
+                g2.setColor(colCarBorder);
+                g2.setStroke(stroke10);
+                g2.draw(carBodyShape);
 
                 // Vidros / Para-brisas
-                g2.setColor(new Color(25, 30, 40));
+                g2.setColor(colWindow);
                 g2.fillRoundRect(2, -vWidth / 2 + 2, 6, vWidth - 4, 3, 3);
                 g2.fillRoundRect(-vLength / 2 + 4, -vWidth / 2 + 2, 4, vWidth - 4, 2, 2);
 
                 // Faróis discretos
-                g2.setColor(new Color(245, 245, 230));
+                g2.setColor(colHeadlight);
                 g2.fillRect(vLength / 2 - 2, -vWidth / 2 + 2, 2, 3);
                 g2.fillRect(vLength / 2 - 2, vWidth / 2 - 5, 2, 3);
 
                 // Luzes de travão
                 if (v.isBraking || v.currentSpeed < 0.2) {
-                    g2.setColor(new Color(235, 40, 40));
+                    g2.setColor(colBrakeOn);
                     g2.fillRect(-vLength / 2, -vWidth / 2 + 2, 3, 3);
                     g2.fillRect(-vLength / 2, vWidth / 2 - 5, 3, 3);
                 } else {
-                    g2.setColor(new Color(130, 40, 40));
+                    g2.setColor(colBrakeOff);
                     g2.fillRect(-vLength / 2, -vWidth / 2 + 2, 2, 2);
                     g2.fillRect(-vLength / 2, vWidth / 2 - 4, 2, 2);
                 }
 
                 // Sirene rotativa para veículos prioritários (Ambulância, Bombeiros, Polícia)
                 if (v.isEmergency) {
-                    boolean strobe = (tickCounter / 6) % 2 == 0;
-                    Color sirenColor = strobe ? new Color(0, 140, 255) : new Color(255, 30, 30);
-                    g2.setColor(sirenColor);
+                    g2.setColor(strobe ? colSirenBlue : colSirenRed);
                     g2.fillOval(-3, -3, 6, 6);
                 }
 
                 g2.setTransform(old);
 
                 // Etiquetas adaptativas
-                boolean isSelected = v.id.equals(selectedVehicleId);
                 if (isSelected) {
-                    g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
+                    g2.setFont(fontBold10);
                     String labelIntent = (v.intent == ManeuverIntent.TURN_RIGHT) ? "[R]"
                             : (v.intent == ManeuverIntent.TURN_LEFT ? "[L]" : "[S]");
                     String destTag = " -> C" + (v.destinationIntersectionId + 1);
-                    String speedTag = " (" + String.format(Locale.ROOT, "%.1f", v.currentSpeed * 10.0) + " km/h)";
+                    String speedTag = " (" + (Math.round(v.currentSpeed * 100.0) / 10.0) + " km/h)";
                     String fullTag = v.id + " " + labelIntent + destTag + speedTag;
                     int tagW = g2.getFontMetrics().stringWidth(fullTag);
                     int tagX = (int) Math.round(v.x) - tagW / 2;
                     int tagY = (int) Math.round(v.y) - 16;
 
-                    g2.setColor(new Color(20, 26, 38, 225));
+                    g2.setColor(colTagBg);
                     g2.fillRoundRect(tagX - 5, tagY - 11, tagW + 10, 15, 6, 6);
-                    g2.setColor(new Color(255, 215, 70));
-                    g2.setStroke(new BasicStroke(1.2f));
+                    g2.setColor(colTagGold);
+                    g2.setStroke(stroke12);
                     g2.drawRoundRect(tagX - 5, tagY - 11, tagW + 10, 15, 6, 6);
                     g2.drawString(fullTag, tagX, tagY);
                 } else if (v.isEmergency) {
-                    g2.setColor(new Color(210, 30, 50));
-                    g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+                    g2.setColor(colEmergText);
+                    g2.setFont(fontBold9);
                     String prefix = v.category.equals("FIRE_TRUCK") ? "[BOM] " : (v.category.equals("POLICE") ? "[POL] " : "[AMB] ");
                     String urgTag = " U" + v.urgencyLevel + (v.activeMission ? "" : " (INAT)");
                     g2.drawString(prefix + v.id + urgTag, (int) Math.round(v.x) - 24, (int) Math.round(v.y) - 10);
                 } else if (v.yieldState != null && v.yieldState != VehicleYieldState.NORMAL_DRIVING) {
-                    // Badge de estado de cedência física a viatura prioritária (Fase 6.3)
-                    g2.setFont(new Font("Segoe UI", Font.BOLD, 8));
+                    g2.setFont(fontBold8);
                     String badge;
                     Color badgeBg;
                     if (v.yieldState == VehicleYieldState.YIELDING_RIGHT || v.yieldState == VehicleYieldState.PULLING_OVER) {
                         badge = "CEDER >>";
-                        badgeBg = new Color(255, 140, 0, 220);
+                        badgeBg = colYieldOrange;
                     } else if (v.yieldState == VehicleYieldState.YIELDING_STOPPED || v.yieldState == VehicleYieldState.WAITING_FOR_EMERGENCY_PASSAGE) {
                         badge = "CEDIDO";
-                        badgeBg = new Color(34, 139, 34, 220);
+                        badgeBg = colYieldGreen;
                     } else if (v.yieldState == VehicleYieldState.YIELD_NOT_SAFE) {
                         badge = "INSEGURO";
-                        badgeBg = new Color(220, 20, 60, 220);
+                        badgeBg = colYieldRed;
                     } else if (v.yieldState == VehicleYieldState.RESUMING_ROUTE) {
                         badge = "RETOMA";
-                        badgeBg = new Color(70, 130, 180, 220);
+                        badgeBg = colYieldBlue;
                     } else {
                         badge = v.yieldState.name();
-                        badgeBg = new Color(100, 110, 125, 220);
+                        badgeBg = colYieldGray;
                     }
                     int bw = g2.getFontMetrics().stringWidth(badge) + 6;
+                    int badgeYOffset = (v.laneIndex == 0) ? 20 : 8;
                     g2.setColor(badgeBg);
-                    g2.fillRoundRect((int) Math.round(v.x) - bw / 2, (int) Math.round(v.y) - 17, bw, 11, 4, 4);
+                    g2.fillRoundRect((int) Math.round(v.x) - bw / 2, (int) Math.round(v.y) - badgeYOffset - 9, bw, 11, 4, 4);
                     g2.setColor(Color.WHITE);
-                    g2.drawString(badge, (int) Math.round(v.x) - bw / 2 + 3, (int) Math.round(v.y) - 8);
+                    g2.drawString(badge, (int) Math.round(v.x) - bw / 2 + 3, (int) Math.round(v.y) - badgeYOffset);
                 } else {
-                    // Micro-badge limpo para veículos normais não selecionados
-                    g2.setFont(new Font("Segoe UI", Font.BOLD, 8));
-                    g2.setColor(new Color(50, 60, 75, 200));
-                    String shortTag = "#" + v.id.replaceAll("\\D+", "");
-                    if (shortTag.equals("#")) shortTag = v.id;
-                    g2.drawString(shortTag, (int) Math.round(v.x) - 8, (int) Math.round(v.y) - 9);
+                    g2.setFont(fontBold8);
+                    g2.setColor(colMicroTag);
+                    g2.drawString(v.shortTag, (int) Math.round(v.x) - 8, (int) Math.round(v.y) - 9);
                 }
             }
         }
@@ -3977,79 +4521,85 @@ public class CitySimulationGUI {
             int hudW = width - 32;
             int hudH = 74;
 
-            g2.setColor(new Color(250, 252, 255, 245));
-            g2.fill(new RoundRectangle2D.Double(hudX, hudY, hudW, hudH, 14, 14));
+            g2.setColor(colHudBg);
+            g2.fillRoundRect(hudX, hudY, hudW, hudH, 14, 14);
 
-            g2.setColor(new Color(190, 200, 215));
-            g2.setStroke(new BasicStroke(1.2f));
-            g2.draw(new RoundRectangle2D.Double(hudX, hudY, hudW, hudH, 14, 14));
+            g2.setColor(colHudBorder);
+            g2.setStroke(stroke12);
+            g2.drawRoundRect(hudX, hudY, hudW, hudH, 14, 14);
 
             // Título Principal e Topologia
-            g2.setColor(new Color(30, 40, 55));
-            g2.setFont(new Font("Segoe UI", Font.BOLD, 13));
+            g2.setColor(colHudTitle);
+            g2.setFont(fontBold13);
             g2.drawString("TrafficMAS " + top.getRows() + "x" + top.getCols(), hudX + 14, hudY + 21);
 
-            g2.setColor(new Color(100, 115, 135));
-            g2.setFont(new Font("Segoe UI", Font.PLAIN, 10));
+            g2.setColor(colHudSub);
+            g2.setFont(fontPlain10);
             g2.drawString(interCount + " Cruzamentos | " + (interCount * 2) + " Semáforos | A* + Manhattan", hudX + 14, hudY + 35);
 
             // Linha 2: Status do Ambiente e Cedência a Emergências
             WeatherStateSnapshot wSnap = WeatherEnvironmentManager.getInstance().getSnapshot();
             boolean hasAlert = globalSpeedMultiplier < 0.95 || wSnap.getRoadCondition() != RoadCondition.DRY;
-            g2.setColor(hasAlert ? new Color(220, 50, 50) : new Color(30, 140, 60));
-            g2.setFont(new Font("Segoe UI", Font.BOLD, 10));
+            g2.setColor(hasAlert ? colHudAlert : colHudOk);
+            g2.setFont(fontBold10);
             String statusPrefix = hasAlert ? "[ALERTA] " : "[OK] ";
-            String weatherText = " | " + wSnap.getWeatherType().getCode() + " + " + wSnap.getRoadCondition().getCode() + " (Atrito=" + String.format(Locale.ROOT, "%.2f", wSnap.getFriction()) + ")";
+            String weatherText = " | " + wSnap.getWeatherType().getCode() + " + " + wSnap.getRoadCondition().getCode()
+                    + " (Atrito=" + (Math.round(wSnap.getFriction() * 100.0) / 100.0) + ")";
             String mlText = (mlPredictionNotice != null && !mlPredictionNotice.isEmpty()) ? " | " + mlPredictionNotice : "";
             String yieldHud = " | Cedências: " + totalYieldsCompleted + " concl.";
             g2.drawString(statusPrefix + disruptionNotice + weatherText + mlText + yieldHud, hudX + 14, hudY + 58);
 
-            long normalCars = vehicles.stream().filter(v -> !v.isEmergency).count();
-            long priorityCars = vehicles.stream().filter(v -> v.isEmergency).count();
-            long stoppedCars = vehicles.stream().filter(v -> v.currentSpeed < 0.2).count();
+            int normalCars = 0;
+            int priorityCars = 0;
+            int stoppedCars = 0;
+            for (VisualVehicle v : vehicles) {
+                if (v.isEmergency) priorityCars++;
+                else normalCars++;
+                if (v.currentSpeed < 0.2) stoppedCars++;
+            }
             long elapsedSec = (System.currentTimeMillis() - simulationStartMillis) / 1000;
             double avgWait = getAverageWaitSeconds();
             int jadeAgents = FleetLifecycleManager.getInstance().getLiveJadeAgentsCount();
 
             // Badges de Telemetria
-            drawBadge(g2, hudX + 235, hudY + 10, "NORMAIS", normalCars + "/" + FleetLifecycleManager.MAX_NORMAL_VEHICLES, new Color(20, 130, 210));
-            drawBadge(g2, hudX + 312, hudY + 10, "PRIORIT.", String.valueOf(priorityCars), new Color(200, 35, 65));
-            drawBadge(g2, hudX + 372, hudY + 10, "JADE", String.valueOf(jadeAgents > 0 ? jadeAgents : vehicles.size()), new Color(60, 95, 180));
-            drawBadge(g2, hudX + 422, hudY + 10, "PARADOS", String.valueOf(stoppedCars), (stoppedCars > 0) ? new Color(220, 60, 60) : new Color(40, 170, 90));
-            drawBadge(g2, hudX + 485, hudY + 10, "ESPERA", avgWait + "s", new Color(220, 120, 20));
-            drawBadge(g2, hudX + 545, hudY + 10, "DÉBITO", String.valueOf(getTotalCompletedPasses()), new Color(30, 160, 110));
-            drawBadge(g2, hudX + 605, hudY + 10, "FPS / T", displayedFps + " / " + elapsedSec + "s", new Color(95, 95, 145));
+            drawBadge(g2, hudX + 235, hudY + 10, "NORMAIS", normalCars + "/" + FleetLifecycleManager.MAX_NORMAL_VEHICLES, colBadgeNorm);
+            drawBadge(g2, hudX + 312, hudY + 10, "PRIORIT.", String.valueOf(priorityCars), colBadgePrio);
+            drawBadge(g2, hudX + 372, hudY + 10, "JADE", String.valueOf(jadeAgents > 0 ? jadeAgents : vehicles.size()), colBadgeJade);
+            drawBadge(g2, hudX + 422, hudY + 10, "PARADOS", String.valueOf(stoppedCars), (stoppedCars > 0) ? colBadgeStop : colBadgeGo);
+            drawBadge(g2, hudX + 485, hudY + 10, "ESPERA", avgWait + "s", colBadgeWait);
+            drawBadge(g2, hudX + 545, hudY + 10, "DÉBITO", String.valueOf(getTotalCompletedPasses()), colBadgeFlow);
+            drawBadge(g2, hudX + 605, hudY + 10, "FPS / T", displayedFps + " / " + elapsedSec + "s", colBadgeFps);
 
             // Indicadores luminosos de todos os Cruzamentos (4 em 2×2 ou 9 em 3×3)
             int crossStartX = hudX + 685;
             int stepX = (interCount <= 4) ? 54 : 38;
+            g2.setFont(fontBold9);
             for (int i = 0; i < interCount; i++) {
                 int cx = crossStartX + (i * stepX);
                 if (cx + 34 > hudX + hudW - 6) break;
 
-                g2.setColor(new Color(80, 95, 115));
-                g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+                g2.setColor(colHudCrossLbl);
                 g2.drawString(top.getIntersectionShortLabel(i), cx, hudY + 21);
 
                 LightState ns = lights[i][0];
-                g2.setColor(ns == LightState.GREEN ? new Color(40, 200, 90)
-                        : (ns == LightState.YELLOW ? new Color(240, 190, 30) : new Color(230, 60, 60)));
+                g2.setColor(ns == LightState.GREEN ? colHudGreen
+                        : (ns == LightState.YELLOW ? colHudYellow : colHudRed));
                 g2.fillRoundRect(cx, hudY + 26, 15, 7, 3, 3);
 
                 LightState ew = lights[i][1];
-                g2.setColor(ew == LightState.GREEN ? new Color(40, 200, 90)
-                        : (ew == LightState.YELLOW ? new Color(240, 190, 30) : new Color(230, 60, 60)));
+                g2.setColor(ew == LightState.GREEN ? colHudGreen
+                        : (ew == LightState.YELLOW ? colHudYellow : colHudRed));
                 g2.fillRoundRect(cx + 17, hudY + 26, 15, 7, 3, 3);
             }
         }
 
         private void drawBadge(Graphics2D g2, int x, int y, String title, String val, Color c) {
-            g2.setColor(new Color(110, 125, 145));
-            g2.setFont(new Font("Segoe UI", Font.BOLD, 9));
+            g2.setColor(colHudBadgeTitle);
+            g2.setFont(fontBold9);
             g2.drawString(title, x, y + 10);
 
             g2.setColor(c);
-            g2.setFont(new Font("Segoe UI", Font.BOLD, 13));
+            g2.setFont(fontBold13);
             g2.drawString(val, x, y + 26);
         }
     }
